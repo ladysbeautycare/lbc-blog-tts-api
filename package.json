@@ -2,16 +2,15 @@
   "name": "lbc-blog-tts-api",
   "version": "1.0.0",
   "description": "Blog TTS API for Cloudflare Workers",
-  "main": "src/index.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "publish": "wrangler deploy --env production"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "google-auth-library": "^9.0.0",
-    "@google-cloud/text-to-speech": "^4.5.0",
+    "@google-cloud/text-to-speech": "^5.1.0",
     "googleapis": "^118.0.0"
   },
   "devDependencies": {
