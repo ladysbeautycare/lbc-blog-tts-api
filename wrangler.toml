@@ -1,0 +1,9 @@
+name = "lbc-blog-tts-api"
+main = "src/index.js"
+compatibility_date = "2024-12-16"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+GOOGLE_PROJECT_ID = "913649475121"
+GOOGLE_WORKLOAD_IDENTITY_PROVIDER = "projects/913649475121/locations/global/workloadIdentityPools/lbc-render-pool/providers/render"
+GOOGLE_DRIVE_FOLDER_ID = "1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl"
