@@ -1,27 +1,21 @@
 // =============================================================
-// BLOG TTS API — PRODUCTION READY WITH WIF
+// BLOG TTS API — PRODUCTION READY WITH API KEY
 // =============================================================
-// Enterprise-grade text-to-speech with Workload Identity Federation
-// Secure: No JSON keys, temporary credentials only
-// Scalable: Google Cloud infrastructure
-// Cost-efficient: 66-75% savings with caching
+// Enterprise-grade text-to-speech with caching
+// Simple, reliable, and secure authentication
 //
 // Environment Variables (required):
-//   GOOGLE_PROJECT_ID
-//   GOOGLE_WORKLOAD_IDENTITY_PROVIDER
-//   GOOGLE_DRIVE_FOLDER_ID
-//   GOOGLE_APPLICATION_CREDENTIALS (optional, set by code)
+//   GOOGLE_PROJECT_ID: 913649475121
+//   GOOGLE_API_KEY: (stored as Secret in Render)
+//   GOOGLE_DRIVE_FOLDER_ID: 1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl
 // =============================================================
 
 const express = require("express");
 const { TextToSpeechClient } = require("@google-cloud/text-to-speech");
 const { google } = require("googleapis");
-const { GoogleAuth } = require("google-auth-library");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
 
 // ─── CONFIGURATION ────────────────────────────────────────
 const app = express();
@@ -72,46 +66,6 @@ const logger = {
   },
 };
 
-// ─── SETUP WORKLOAD IDENTITY FEDERATION ───────────────────
-function setupWIFCredentials() {
-  try {
-    const projectId = process.env.GOOGLE_PROJECT_ID;
-    const poolProvider = process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER;
-    const serviceAccount = 'lbc-blog-tts@lady-s-beauty-care-4e20d.iam.gserviceaccount.com';
-
-    if (!projectId || !poolProvider) {
-      throw new Error('Missing required WIF environment variables');
-    }
-
-    // Create external account configuration for WIF
-    const wifConfig = {
-      type: 'external_account',
-      audience: `//iam.googleapis.com/${poolProvider}`,
-      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
-      service_account_impersonation_url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${serviceAccount}:generateAccessToken`,
-      token_url: 'https://sts.googleapis.com/v1/token',
-      token_info_url: 'https://sts.googleapis.com/v1/tokeninfo',
-      credential_source: {
-        executable: {
-          command: 'cat /proc/self/environ | grep RENDER',
-          timeout_millis: 5000
-        }
-      }
-    };
-
-    // Write config to temporary file
-    const credPath = '/tmp/wif-config.json';
-    fs.writeFileSync(credPath, JSON.stringify(wifConfig, null, 2));
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = credPath;
-
-    logger.info('✓ WIF credentials configured', { path: credPath });
-    return true;
-  } catch (error) {
-    logger.warn('WIF setup encountered issue', error.message);
-    return false;
-  }
-}
-
 // ─── GOOGLE CLIENTS (CACHED) ──────────────────────────────
 let ttsClient = null;
 let driveClient = null;
@@ -124,40 +78,32 @@ async function initializeGoogleClients() {
 
   try {
     // Validate required environment variables
-    const required = ['GOOGLE_PROJECT_ID', 'GOOGLE_WORKLOAD_IDENTITY_PROVIDER', 'GOOGLE_DRIVE_FOLDER_ID'];
+    const required = ['GOOGLE_PROJECT_ID', 'GOOGLE_API_KEY', 'GOOGLE_DRIVE_FOLDER_ID'];
     const missing = required.filter(v => !process.env[v]);
     
     if (missing.length > 0) {
       throw new Error(`Missing environment variables: ${missing.join(', ')}`);
     }
 
-    // Setup WIF credentials
-    setupWIFCredentials();
+    logger.info('Initializing Google Cloud clients with API Key...');
 
-    logger.info('Initializing Google Cloud clients with Workload Identity Federation...');
-
-    // Initialize with GoogleAuth (automatically uses GOOGLE_APPLICATION_CREDENTIALS)
-    const auth = new GoogleAuth({
-      projectId: process.env.GOOGLE_PROJECT_ID,
-      scopes: [
-        'https://www.googleapis.com/auth/cloud-platform',
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/texttospeech'
-      ]
-    });
-
+    // Initialize TTS client with API key
     ttsClient = new TextToSpeechClient({
       projectId: process.env.GOOGLE_PROJECT_ID,
-      auth: auth
+      apiKey: process.env.GOOGLE_API_KEY
     });
 
+    // Initialize Drive client with API key
     driveClient = google.drive({
       version: 'v3',
-      auth: auth
+      auth: new (require('google-auth-library')).GoogleAuth({
+        apiKey: process.env.GOOGLE_API_KEY,
+        projectId: process.env.GOOGLE_PROJECT_ID
+      })
     });
 
     googleAuthInitialized = true;
-    logger.info('✓ Google Cloud clients initialized with WIF');
+    logger.info('✓ Google Cloud clients initialized with API Key');
   } catch (error) {
     logger.error('Failed to initialize Google clients', error);
     throw error;
@@ -229,6 +175,7 @@ async function findAudioInDrive(cacheKey) {
       spaces: 'drive',
       fields: 'files(id, name, webContentLink, createdTime)',
       pageSize: 1,
+      key: process.env.GOOGLE_API_KEY
     });
 
     if (response.data.files && response.data.files.length > 0) {
@@ -308,6 +255,7 @@ async function uploadAudioToDrive(cacheKey, audioBuffer) {
         body: audioBuffer,
       },
       fields: 'id, webContentLink, createdTime, size',
+      key: process.env.GOOGLE_API_KEY
     });
 
     logger.info('✓ Audio uploaded to Drive', { 
@@ -520,7 +468,6 @@ process.on('SIGINT', () => {
 const server = app.listen(PORT, () => {
   logger.info(`✓ Blog TTS API listening on port ${PORT}`);
   logger.info(`✓ Environment: ${NODE_ENV}`);
-  logger.info(`✓ Security: Workload Identity Federation enabled`);
   logger.info(`✓ Ready to accept requests`);
   
   // Initialize Google clients on startup
