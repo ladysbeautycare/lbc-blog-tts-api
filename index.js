@@ -14,11 +14,17 @@ import { google } from 'googleapis';
 import crypto from 'crypto';
 
 // ─── ENVIRONMENT ───────────────────────────────────────
-const ENV = {
-  PROJECT_ID: env.GOOGLE_PROJECT_ID,
-  WIF_PROVIDER: env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER,
-  DRIVE_FOLDER_ID: env.GOOGLE_DRIVE_FOLDER_ID,
-};
+let ENV = null;
+
+function initializeENV(env) {
+  if (ENV) return;
+  
+  ENV = {
+    PROJECT_ID: env.GOOGLE_PROJECT_ID,
+    WIF_PROVIDER: env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER,
+    DRIVE_FOLDER_ID: env.GOOGLE_DRIVE_FOLDER_ID,
+  };
+}
 
 // ─── VALIDATE ENV ──────────────────────────────────────
 function validateEnv() {
@@ -394,8 +400,8 @@ function handleRoot(request) {
 // ─── ROUTER ───────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
-    // Make env available globally
-    global.env = env;
+    // Initialize ENV from Cloudflare bindings
+    initializeENV(env);
 
     const url = new URL(request.url);
 
