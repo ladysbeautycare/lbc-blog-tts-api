@@ -1,11 +1,10 @@
 // =============================================================
-// BLOG TTS API — WORKLOAD IDENTITY FEDERATION
+// BLOG TTS API — COMPLETE & WORKING
 // =============================================================
 // Secure Text-to-Speech system with Google Drive caching
 // Uses Workload Identity Federation (no JSON keys)
-// First read: charges API, repeats: FREE from cache
 //
-// Environment Variables (set in Render):
+// Environment Variables:
 //   GOOGLE_PROJECT_ID
 //   GOOGLE_WORKLOAD_IDENTITY_PROVIDER
 //   GOOGLE_DRIVE_FOLDER_ID
@@ -18,9 +17,15 @@ const { GoogleAuth } = require("google-auth-library");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const crypto = require("crypto");
-const logger = require("./logger");
 
-const router = express.Router();
+const app = express();
+app.use(express.json());
+
+// ─── LOGGING ──────────────────────────────────────────────
+const log = {
+  info: (msg, data = {}) => console.log(`[INFO] ${msg}`, data),
+  error: (msg, err = {}) => console.error(`[ERROR] ${msg}`, err),
+};
 
 // ─── INITIALIZE GOOGLE CLIENTS ────────────────────────────
 let ttsClient = null;
@@ -30,7 +35,6 @@ async function initializeGoogleClients() {
   if (ttsClient && driveClient) return;
 
   try {
-    // Use Workload Identity Federation
     const auth = new GoogleAuth({
       projectId: process.env.GOOGLE_PROJECT_ID,
       scopes: [
@@ -40,21 +44,19 @@ async function initializeGoogleClients() {
       ]
     });
 
-    // TTS Client
     ttsClient = new TextToSpeechClient({
       projectId: process.env.GOOGLE_PROJECT_ID,
       auth: auth
     });
 
-    // Drive Client
     driveClient = google.drive({
       version: "v3",
       auth: auth
     });
 
-    logger.info("✓ Google clients initialized via Workload Identity Federation");
+    log.info("✓ Google clients initialized");
   } catch (error) {
-    logger.error("Failed to initialize Google clients", { error: error.message });
+    log.error("Failed to initialize Google clients", error.message);
     throw error;
   }
 }
@@ -80,7 +82,7 @@ async function fetchBlogContent(blogUrl) {
 
     return content.length > 100 ? content : null;
   } catch (error) {
-    logger.error("Blog fetch error", { error: error.message });
+    log.error("Blog fetch error", error.message);
     return null;
   }
 }
@@ -112,7 +114,7 @@ async function findAudioInDrive(cacheKey) {
 
     if (response.data.files && response.data.files.length > 0) {
       const file = response.data.files[0];
-      logger.info("✓ Found cached audio in Drive", { fileName: cacheKey });
+      log.info("✓ Found cached audio", { fileName: cacheKey });
       return {
         fileId: file.id,
         fileName: file.name,
@@ -122,7 +124,7 @@ async function findAudioInDrive(cacheKey) {
 
     return null;
   } catch (error) {
-    logger.error("Drive search error", { error: error.message });
+    log.error("Drive search error", error.message);
     return null;
   }
 }
@@ -153,11 +155,10 @@ async function synthesizeSpeech(text) {
       throw new Error("No audio content returned");
     }
 
-    logger.info("✓ Audio synthesized", { contentLength: response.audioContent.length });
+    log.info("✓ Audio synthesized", { size: response.audioContent.length });
     return response.audioContent;
-
   } catch (error) {
-    logger.error("TTS synthesis error", { error: error.message });
+    log.error("TTS synthesis error", error.message);
     throw error;
   }
 }
@@ -187,22 +188,21 @@ async function uploadAudioToDrive(cacheKey, audioBuffer) {
       fields: "id, webContentLink",
     });
 
-    logger.info("✓ Audio uploaded to Drive", { fileId: response.data.id });
+    log.info("✓ Audio uploaded to Drive", { fileId: response.data.id });
 
     return {
       fileId: response.data.id,
       fileName: cacheKey,
       downloadLink: response.data.webContentLink,
     };
-
   } catch (error) {
-    logger.error("Drive upload error", { error: error.message });
+    log.error("Drive upload error", error.message);
     throw error;
   }
 }
 
 // ─── MAIN ENDPOINT: READ BLOG ALOUD ────────────────────────
-router.post("/api/blog/read-aloud", async (req, res) => {
+app.post("/api/blog/read-aloud", async (req, res) => {
   try {
     const { blogPostId, blogUrl, blogContent } = req.body;
 
@@ -251,7 +251,7 @@ router.post("/api/blog/read-aloud", async (req, res) => {
     });
 
   } catch (error) {
-    logger.error("Read aloud endpoint error", { error: error.message });
+    log.error("Read aloud endpoint error", error.message);
     return res.status(500).json({
       error: "Failed to generate audio",
       message: error.message
@@ -260,8 +260,37 @@ router.post("/api/blog/read-aloud", async (req, res) => {
 });
 
 // ─── HEALTH CHECK ─────────────────────────────────────────
-router.get("/api/blog/health", (req, res) => {
+app.get("/api/blog/health", (req, res) => {
   res.json({ status: "TTS system ready" });
 });
 
-module.exports = router;
+// ─── ROOT ENDPOINT ────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({ 
+    service: "LBC Blog TTS API",
+    status: "running",
+    endpoints: {
+      health: "GET /api/blog/health",
+      readAloud: "POST /api/blog/read-aloud"
+    }
+  });
+});
+
+// ─── ERROR HANDLER ────────────────────────────────────────
+app.use((err, req, res, next) => {
+  log.error("Unhandled error", err.message);
+  res.status(500).json({
+    error: "Internal server error",
+    message: err.message
+  });
+});
+
+// ─── START SERVER ─────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  log.info(`✓ Blog TTS API listening on port ${PORT}`);
+  log.info(`✓ Ready to accept requests`);
+});
+
+module.exports = app;
