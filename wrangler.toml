@@ -5,5 +5,5 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 GOOGLE_PROJECT_ID = "913649475121"
-GOOGLE_WORKLOAD_IDENTITY_PROVIDER = "projects/913649475121/locations/global/workloadIdentityPools/lbc-render-pool/providers/render"
+GOOGLE_API_KEY = "$GOOGLE_API_KEY"
 GOOGLE_DRIVE_FOLDER_ID = "1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl"
