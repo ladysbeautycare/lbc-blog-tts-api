@@ -1,7 +1,8 @@
 /**
- * Blog TTS API - Cloudflare Workers v3.0.1 FIXED
- * Simplified multi-chunk + sentence highlighting
- * Better error handling + timeout protection
+ * Blog TTS API - Cloudflare Workers v4.0
+ * Multi-chunk approach: Return array of chunks for frontend to play sequentially
+ * Handles blogs 25,000+ characters
+ * No MP3 concatenation issues
  */
 
 const corsHeaders = {
@@ -35,9 +36,7 @@ async function getAccessToken(serviceAccountJSON) {
       }).toString(),
     });
 
-    if (!response.ok) {
-      throw new Error(`Token failed: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Token failed: ${response.status}`);
     const data = await response.json();
     return data.access_token;
   } catch (error) {
@@ -82,7 +81,7 @@ async function signJWT(header, payload, privateKey) {
   return `${message}.${signatureEncoded}`;
 }
 
-// ─── FETCH BLOG CONTENT ───────────────────────────────────
+// ─── FETCH & EXTRACT BLOG CONTENT ─────────────────────────
 
 async function fetchBlogContent(blogUrl) {
   try {
@@ -95,42 +94,50 @@ async function fetchBlogContent(blogUrl) {
 
     // Extract title
     let title = '';
-    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/is);
+    const titleMatch = html.match(/<h1[^>]*class="[^"]*post-title[^"]*"[^>]*>(.*?)<\/h1>/is)
+      || html.match(/<title[^>]*>(.*?)<\/title>/is);
     if (titleMatch) {
-      title = titleMatch[1].split('|')[0].trim();
+      title = titleMatch[1].replace(/<[^>]+>/g, '').split('|')[0].trim();
     }
 
-    // Remove unwanted blocks
+    // Remove unwanted elements
     html = html
       .replace(/<script\b[\s\S]*?<\/script>/gi, '')
       .replace(/<style\b[\s\S]*?<\/style>/gi, '')
       .replace(/<nav\b[\s\S]*?<\/nav>/gi, '')
       .replace(/<footer\b[\s\S]*?<\/footer>/gi, '')
-      .replace(/<img[^>]*>/gi, '');
+      .replace(/<img[^>]*>/gi, '')
+      .replace(/<figure\b[\s\S]*?<\/figure>/gi, '');
 
-    // Extract article
-    let articleHtml = '';
-    const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-    if (articleMatch) {
-      articleHtml = articleMatch[1];
+    // Extract entry-content
+    let content = '';
+    const entryMatch = html.match(/<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    
+    if (entryMatch) {
+      content = entryMatch[1];
     } else {
-      const entryMatch = html.match(/<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
-      if (entryMatch) {
-        articleHtml = entryMatch[1];
+      const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+      if (articleMatch) {
+        content = articleMatch[1];
       }
     }
 
-    // Convert to text
-    let content = articleHtml
+    // Convert HTML to text
+    let text = content
       .replace(/<h[1-6][^>]*>(.*?)<\/h[1-6]>/gi, '\n\n$1\n\n')
       .replace(/<p[^>]*>/gi, '\n')
       .replace(/<\/p>/gi, '\n')
       .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<li[^>]*>(.*?)<\/li>/gi, '\n$1\n')
-      .replace(/<[^>]+>/g, ' ')
+      .replace(/<li[^>]*>(.*?)<\/li>/gi, '\n• $1\n')
+      .replace(/<ul[^>]*>|<\/ul>/gi, '\n')
+      .replace(/<ol[^>]*>|<\/ol>/gi, '\n')
+      .replace(/<div[^>]*>|<\/div>/gi, '\n')
+      .replace(/<span[^>]*>(.*?)<\/span>/gi, '$1')
+      .replace(/<strong[^>]*>(.*?)<\/strong>/gi, '$1')
+      .replace(/<em[^>]*>(.*?)<\/em>/gi, '$1')
+      .replace(/<a[^>]*>(.*?)<\/a>/gi, '$1')
+      .replace(/<[^>]+>/g, '')
       .replace(/&amp;/g, ' and ')
-      .replace(/&lt;/g, '')
-      .replace(/&gt;/g, '')
       .replace(/&nbsp;/g, ' ')
       .replace(/&#39;/g, "'")
       .replace(/&quot;/g, '"')
@@ -138,41 +145,44 @@ async function fetchBlogContent(blogUrl) {
       .replace(/[ \t]+/g, ' ')
       .trim();
 
-    if (content.length < 100) throw new Error('Content too short');
-    if (title) {
-      content = title + '.\n\n' + content;
-    }
+    if (text.length < 100) throw new Error('Content too short');
+    if (title) text = title + '.\n\n' + text;
 
-    console.log(`Fetched content: ${content.length} chars`);
-    return content;
+    console.log(`Extracted ${text.length} chars from blog`);
+    return text;
   } catch (error) {
     console.error('Fetch error:', error.message);
     throw error;
   }
 }
 
-// ─── SPLIT INTO CHUNKS ────────────────────────────────────
+// ─── SPLIT INTO CHUNKS (SMART) ────────────────────────────
 
-function splitIntoChunks(text, maxSize = 3000) {
+function splitIntoChunks(text, maxChunkSize = 2000) {
+  /**
+   * Split text into chunks respecting sentence boundaries
+   * Each chunk ~2000 chars to stay well under 5000-byte SSML limit
+   */
   const chunks = [];
-  let current = '';
+  let currentChunk = '';
 
+  // Split by sentences
   const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
 
   for (const sentence of sentences) {
     const trimmed = sentence.trim();
     if (!trimmed) continue;
 
-    if (current.length + trimmed.length > maxSize && current.length > 0) {
-      chunks.push(current.trim());
-      current = trimmed;
+    if (currentChunk.length + trimmed.length > maxChunkSize && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      currentChunk = trimmed;
     } else {
-      current += (current ? ' ' : '') + trimmed;
+      currentChunk += (currentChunk ? ' ' : '') + trimmed;
     }
   }
 
-  if (current.trim()) {
-    chunks.push(current.trim());
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
   }
 
   console.log(`Split into ${chunks.length} chunks`);
@@ -188,19 +198,24 @@ function textToSSML(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  ssml = ssml.replace(/\n\n+/g, '<break time="750ms"/>');
-  ssml = ssml.replace(/\n/g, '<break time="350ms"/>');
-  ssml = ssml.replace(/([.!?])\s+/g, '$1<break time="300ms"/> ');
-  ssml = ssml.replace(/:\s+/g, ':<break time="250ms"/> ');
+  ssml = ssml.replace(/\n\n+/g, '<break time="800ms"/>');
+  ssml = ssml.replace(/\n/g, '<break time="400ms"/>');
+  ssml = ssml.replace(/([.!?])\s+/g, '$1<break time="350ms"/> ');
+  ssml = ssml.replace(/:\s+/g, ':<break time="300ms"/> ');
 
   return `<speak>${ssml}</speak>`;
 }
 
-// ─── CALL GOOGLE TTS ──────────────────────────────────────
+// ─── SYNTHESIZE ONE CHUNK ────────────────────────────────
 
 async function synthesizeSpeech(accessToken, text) {
   try {
     const ssml = textToSSML(text);
+    const ssmlBytes = new TextEncoder().encode(ssml);
+    
+    if (ssmlBytes.length > 4800) {
+      throw new Error(`SSML too large: ${ssmlBytes.length} bytes`);
+    }
 
     const response = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize', {
       method: 'POST',
@@ -223,43 +238,20 @@ async function synthesizeSpeech(accessToken, text) {
 
     if (!response.ok) {
       const err = await response.text();
-      throw new Error(`TTS ${response.status}: ${err.substring(0, 100)}`);
+      throw new Error(`TTS ${response.status}`);
     }
 
     const data = await response.json();
-    if (!data.audioContent) throw new Error('No audio content');
+    if (!data.audioContent) throw new Error('No audio');
 
-    const binaryString = atob(data.audioContent);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
+    return data.audioContent; // Return base64 directly
   } catch (error) {
     console.error('TTS error:', error.message);
     throw error;
   }
 }
 
-// ─── CONCATENATE AUDIO ────────────────────────────────────
-
-function concatenateAudio(chunks) {
-  let totalLength = 0;
-  for (const chunk of chunks) {
-    totalLength += chunk.length;
-  }
-
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return result;
-}
-
-// ─── WORKER ENTRY ─────────────────────────────────────────
+// ─── WORKER ENTRY POINT ───────────────────────────────────
 
 export default {
   async fetch(request, env) {
@@ -270,27 +262,24 @@ export default {
     }
 
     try {
-      // Root
       if (url.pathname === '/') {
         return jsonResponse({
           service: 'LBC Blog TTS API',
-          version: '3.0.1',
-          features: ['multi-chunk', 'sentence-highlighting']
+          version: '4.0',
+          features: ['unlimited-blog-length', 'multi-chunk-sequential', 'no-mp3-concat']
         });
       }
 
-      // Health
       if (url.pathname === '/api/blog/health') {
         try {
           const serviceAccountJSON = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
           await getAccessToken(serviceAccountJSON);
-          return jsonResponse({ status: 'healthy', version: '3.0.1' });
+          return jsonResponse({ status: 'healthy', version: '4.0' });
         } catch (error) {
           return jsonResponse({ status: 'unhealthy', error: error.message }, 503);
         }
       }
 
-      // Read aloud
       if (url.pathname === '/api/blog/read-aloud' && request.method === 'POST') {
         const data = await request.json();
         const { blogPostId, blogUrl, blogContent } = data;
@@ -309,36 +298,33 @@ export default {
         }
 
         // Split into chunks
-        const textChunks = splitIntoChunks(content, 3000);
+        const textChunks = splitIntoChunks(content, 2000);
+        console.log(`Processing ${textChunks.length} chunks for ${content.length} chars`);
 
-        // Generate audio for each chunk
+        // Generate audio chunks
         const audioChunks = [];
         for (let i = 0; i < textChunks.length; i++) {
-          console.log(`Chunk ${i + 1}/${textChunks.length}`);
-          const audioBytes = await synthesizeSpeech(accessToken, textChunks[i]);
-          audioChunks.push(audioBytes);
+          try {
+            console.log(`Chunk ${i + 1}/${textChunks.length}`);
+            const audioBase64 = await synthesizeSpeech(accessToken, textChunks[i]);
+            audioChunks.push({
+              index: i,
+              audioBase64: audioBase64,
+              textLength: textChunks[i].length
+            });
+          } catch (chunkError) {
+            console.error(`Chunk ${i} failed:`, chunkError.message);
+            throw chunkError;
+          }
         }
-
-        // Concatenate
-        const fullAudio = concatenateAudio(audioChunks);
-
-        // Convert to base64
-        let binaryString = '';
-        const chunkSize = 8192;
-        for (let i = 0; i < fullAudio.length; i += chunkSize) {
-          const chunk = fullAudio.subarray(i, i + chunkSize);
-          binaryString += String.fromCharCode.apply(null, chunk);
-        }
-        const audioBase64 = btoa(binaryString);
 
         return jsonResponse({
           success: true,
           cached: false,
-          audioBase64: audioBase64,
-          contentLength: fullAudio.length,
-          chunkCount: textChunks.length,
+          audioChunks: audioChunks,
+          totalChunks: audioChunks.length,
           totalChars: content.length,
-          multiChunk: textChunks.length > 1
+          playbackMode: 'sequential'
         });
       }
 
