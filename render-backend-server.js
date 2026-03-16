@@ -230,16 +230,19 @@ app.post('/api/blog/generate-audio', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { blogContent, blogUrl, blogPostId } = req.body;
+    const { blogContent, blogText, blogUrl, blogPostId } = req.body;
 
-    if (!blogContent && !blogUrl) {
+    // Support both blogContent and blogText for compatibility
+    const textContent = blogContent || blogText;
+
+    if (!textContent && !blogUrl) {
       return res.status(400).json({
         success: false,
-        error: 'Missing blogContent or blogUrl',
+        error: 'Missing blogContent/blogText or blogUrl',
       });
     }
 
-    let content = blogContent;
+    let content = textContent;
     if (!content && blogUrl) {
       // Fetch from URL if needed
       try {
@@ -413,7 +416,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
 
-  app.listen(PORT, () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 LBC Blog TTS Render Backend running on port ${PORT}`);
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
     console.log(`📍 Generate audio: POST http://localhost:${PORT}/api/blog/generate-audio\n`);

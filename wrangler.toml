@@ -1,9 +1,0 @@
-name = "lbc-blog-tts-api"
-type = "javascript"
-account_id = "your-account-id"
-workers_dev = true
-
-[env.production]
-routes = [
-  { pattern = "lbc-blog-tts-api.ladysbeautycare.workers.dev/*", zone_name = "ladysbeautycare.com.au" }
-]
