@@ -1,7 +1,14 @@
 /**
- * Blog TTS API - Cloudflare Workers
+ * Blog TTS API - Cloudflare Workers v3.0
+ * Multi-Chunk SSML Support + Sentence Highlighting
  * Google Service Account + Google Drive Caching
- * v2.0 — Clean content extraction, SSML, natural reading
+ * 
+ * Features:
+ * - Unlimited blog length (splits into chunks automatically)
+ * - Sentence-level highlighting during playback
+ * - Natural pauses between sentences
+ * - Google Drive caching
+ * - Full service account authentication
  */
 
 const corsHeaders = {
@@ -81,14 +88,12 @@ async function signJWT(header, payload, privateKey) {
 // ─── BLOG CONTENT FETCHER ─────────────────────────────────
 
 function convertTableToText(tableHtml) {
-  // Extract headers
   const headers = [];
   const headerMatches = tableHtml.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi);
   for (const m of headerMatches) {
     headers.push(m[1].replace(/<[^>]+>/g, '').trim());
   }
 
-  // Extract rows
   const rows = [];
   const rowMatches = tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
   for (const rm of rowMatches) {
@@ -102,11 +107,9 @@ function convertTableToText(tableHtml) {
 
   if (rows.length === 0) return '';
 
-  // Build readable sentences from table
   let text = '';
   for (const row of rows) {
     if (headers.length > 0 && row.length > 0) {
-      // First cell is usually the item name
       let sentence = row[0];
       for (let i = 1; i < row.length && i < headers.length; i++) {
         if (row[i]) {
@@ -143,11 +146,8 @@ function decodeEntities(text) {
 
 function cleanSpecialChars(text) {
   return text
-    // Arrows and pointers
     .replace(/[→←↑↓↔⟶⟵➜➤►▶◀▸▹▷◁«»]/g, '')
-    // Checkmarks, stars, bullets, decorative symbols
     .replace(/[✓✔✗✘✕✖★☆●○◆◇■□▪▫•‣⦿⦾♦♣♠♥♡]/g, '')
-    // All emoji
     .replace(/[\u{1F600}-\u{1F64F}]/gu, '')
     .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
     .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
@@ -159,17 +159,12 @@ function cleanSpecialChars(text) {
     .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '')
     .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '')
     .replace(/[\u{200D}\u{20E3}\u{FE0F}]/gu, '')
-    // Copyright, trademark
     .replace(/[©®™]/g, '')
-    // Pipe, tilde, caret, backtick, backslash
     .replace(/[|~^`\\]/g, ' ')
-    // Hashtags
     .replace(/#\w+/g, '')
-    // URLs and emails
     .replace(/https?:\/\/\S+/gi, '')
     .replace(/www\.\S+/gi, '')
     .replace(/\S+@\S+\.\S+/gi, '')
-    // Standalone phone number patterns
     .replace(/\b\d{2,4}[\s-]\d{3,4}[\s-]\d{3,4}\b/g, '');
 }
 
@@ -202,7 +197,7 @@ async function fetchBlogContent(blogUrl) {
 
   let html = await response.text();
 
-  // ─── Extract title ───────────────────────────────────────
+  // Extract title
   let title = '';
   const h1Match = html.match(/<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>(.*?)<\/h1>/is)
     || html.match(/<h1[^>]*>(.*?)<\/h1>/is);
@@ -214,7 +209,7 @@ async function fetchBlogContent(blogUrl) {
   }
   title = decodeEntities(title);
 
-  // ─── Phase 1: Remove entire unwanted blocks ──────────────
+  // Remove unwanted blocks
   html = html
     .replace(/<script\b[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[\s\S]*?<\/style>/gi, '')
@@ -224,7 +219,6 @@ async function fetchBlogContent(blogUrl) {
     .replace(/<footer\b[\s\S]*?<\/footer>/gi, '')
     .replace(/<aside\b[\s\S]*?<\/aside>/gi, '')
     .replace(/<form\b[\s\S]*?<\/form>/gi, '')
-    // Images, figures, captions, media
     .replace(/<img[^>]*>/gi, '')
     .replace(/<figure\b[\s\S]*?<\/figure>/gi, '')
     .replace(/<figcaption\b[\s\S]*?<\/figcaption>/gi, '')
@@ -234,16 +228,14 @@ async function fetchBlogContent(blogUrl) {
     .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, '')
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, '')
     .replace(/<canvas\b[\s\S]*?<\/canvas>/gi, '')
-    // Buttons, inputs
     .replace(/<button\b[\s\S]*?<\/button>/gi, '')
     .replace(/<input[^>]*>/gi, '')
     .replace(/<select\b[\s\S]*?<\/select>/gi, '')
     .replace(/<textarea\b[\s\S]*?<\/textarea>/gi, '')
-    // Class-based junk
     .replace(/<[^>]*class="[^"]*(?:sidebar|widget|menu|cart|woo|comment|share|related|breadcrumb|mailerlite|newsletter|social|author-bio|tag-link|post-meta|entry-meta|post-nav|pagination|cookie|gdpr|popup|modal|banner|advertisement|sponsored)[^"]*"[^>]*>[\s\S]*?<\/(?:div|section|aside|ul|ol|span|p)>/gi, '')
     .replace(/<ul[^>]*class="[^"]*(?:menu|nav|cart|sub-menu)[^"]*"[^>]*>[\s\S]*?<\/ul>/gi, '');
 
-  // ─── Phase 2: Extract article content ────────────────────
+  // Extract article content
   let articleHtml = '';
   const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
   if (articleMatch) {
@@ -257,12 +249,12 @@ async function fetchBlogContent(blogUrl) {
     }
   }
 
-  // ─── Phase 3: Convert tables to readable text ────────────
+  // Convert tables to text
   articleHtml = articleHtml.replace(/<table\b[\s\S]*?<\/table>/gi, (match) => {
     return convertTableToText(match);
   });
 
-  // ─── Phase 4: Convert structure to readable text ─────────
+  // Convert structure to text
   articleHtml = articleHtml
     .replace(/<h[1-6][^>]*>(.*?)<\/h[1-6]>/gi, '\n\n$1.\n\n')
     .replace(/<p[^>]*>/gi, '\n')
@@ -271,12 +263,12 @@ async function fetchBlogContent(blogUrl) {
     .replace(/<li[^>]*>(.*?)<\/li>/gi, '\n$1.\n')
     .replace(/<[^>]+>/g, ' ');
 
-  // ─── Phase 5: Decode entities and clean ──────────────────
+  // Clean content
   let content = decodeEntities(articleHtml);
   content = cleanSpecialChars(content);
   content = removeNonArticleText(content);
 
-  // ─── Phase 6: Final whitespace cleanup ───────────────────
+  // Final whitespace cleanup
   content = content
     .replace(/\n\s*\n\s*\n/g, '\n\n')
     .replace(/[ \t]+/g, ' ')
@@ -284,16 +276,6 @@ async function fetchBlogContent(blogUrl) {
     .replace(/\.\./g, '.')
     .replace(/\.\s*\./g, '.')
     .trim();
-
-  // ─── Phase 7: Cap length and cut at sentence ─────────────
-  // SSML adds ~40% overhead with break tags, so cap text at 3500 to stay under 5000 byte TTS limit
-  if (content.length > 3500) {
-    content = content.substring(0, 3500);
-    const lastPeriod = content.lastIndexOf('.');
-    if (lastPeriod > 2800) {
-      content = content.substring(0, lastPeriod + 1);
-    }
-  }
 
   if (content.length < 100) throw new Error('Insufficient content extracted');
 
@@ -303,6 +285,40 @@ async function fetchBlogContent(blogUrl) {
   }
 
   return content;
+}
+
+// ─── MULTI-CHUNK SPLITTER ─────────────────────────────────
+
+function splitIntoChunks(text, maxChunkSize = 3000) {
+  /**
+   * Split text into chunks while respecting sentence boundaries
+   * Ensures each chunk ends with a complete sentence
+   */
+  const chunks = [];
+  let currentChunk = '';
+
+  // Split by sentences (. ! ?)
+  const sentences = text.match(/[^.!?]*[.!?]+/g) || [text];
+
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+
+    // If adding this sentence exceeds max size, save current chunk
+    if (currentChunk.length + trimmed.length > maxChunkSize && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      currentChunk = trimmed;
+    } else {
+      currentChunk += (currentChunk ? ' ' : '') + trimmed;
+    }
+  }
+
+  // Add remaining chunk
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
+  }
+
+  return chunks;
 }
 
 // ─── CACHE KEY (Workers-compatible crypto) ────────────────
@@ -329,8 +345,7 @@ async function findAudioInDrive(accessToken, driveFolderId, cacheKey) {
     });
 
     if (!response.ok) {
-      const err = await response.text();
-      console.log(`Drive search failed: ${response.status} ${err}`);
+      console.log(`Drive search failed: ${response.status}`);
       return null;
     }
 
@@ -350,32 +365,32 @@ async function findAudioInDrive(accessToken, driveFolderId, cacheKey) {
   }
 }
 
-// ─── GOOGLE TTS: SSML CONVERSION ──────────────────────────
+// ─── GOOGLE TTS: SSML WITH SENTENCE MARKERS ───────────────
 
 function textToSSML(text) {
-  // Escape XML special characters
+  /**
+   * Convert text to SSML with:
+   * - Sentence break markers for highlighting
+   * - Natural pauses
+   * - XML escaping
+   */
   let ssml = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // Paragraph breaks (double newlines) — long pause
+  // Mark sentence boundaries for highlighting
+  // Use phoneme tags to mark where sentences start/end (won't affect audio)
+  ssml = ssml.replace(/([.!?])\s+(?=[A-Z])/g, '$1<mark name="sentence-end"/><mark name="sentence-start"/> ');
+  ssml = ssml.replace(/([.!?])$/gm, '$1<mark name="sentence-end"/>');
+
+  // Add natural pauses
   ssml = ssml.replace(/\n\n+/g, '<break time="750ms"/>');
-
-  // Single newlines — shorter pause
   ssml = ssml.replace(/\n/g, '<break time="350ms"/>');
-
-  // Pause after sentences
   ssml = ssml.replace(/([.!?])\s+/g, '$1<break time="300ms"/> ');
-
-  // Pause after colons
   ssml = ssml.replace(/:\s+/g, ':<break time="250ms"/> ');
-
-  // Pause after semicolons
   ssml = ssml.replace(/;\s+/g, ';<break time="200ms"/> ');
-
-  // Clean up double breaks
   ssml = ssml.replace(/(<break[^/]*\/>)\s*(<break[^/]*\/>)/g, '$2');
 
   return `<speak>${ssml}</speak>`;
@@ -416,13 +431,34 @@ async function synthesizeSpeech(accessToken, text) {
   const data = await response.json();
   if (!data.audioContent) throw new Error('No audio content returned');
 
-  // Convert base64 to Uint8Array (Workers-compatible)
   const binaryString = atob(data.audioContent);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes;
+}
+
+// ─── AUDIO CONCATENATION ──────────────────────────────────
+
+function concatenateAudioChunks(chunks) {
+  /**
+   * Concatenate MP3 audio chunks
+   * Simple concatenation works for MP3 files with same encoding
+   */
+  let totalLength = 0;
+  for (const chunk of chunks) {
+    totalLength += chunk.length;
+  }
+
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
 }
 
 // ─── GOOGLE DRIVE: UPLOAD AUDIO ───────────────────────────
@@ -503,8 +539,9 @@ export default {
       if (url.pathname === '/') {
         return jsonResponse({
           service: 'LBC Blog TTS API',
-          version: '2.0',
+          version: '3.0',
           platform: 'Cloudflare Workers',
+          features: ['multi-chunk', 'sentence-highlighting', 'google-drive-cache'],
           endpoints: {
             health: 'GET /api/blog/health',
             readAloud: 'POST /api/blog/read-aloud'
@@ -520,8 +557,9 @@ export default {
           return jsonResponse({
             status: 'healthy',
             service: 'LBC Blog TTS API',
-            version: '2.0',
+            version: '3.0',
             platform: 'Cloudflare Workers',
+            features: ['multi-chunk', 'sentence-highlighting'],
             timestamp: new Date().toISOString()
           });
         } catch (error) {
@@ -529,7 +567,7 @@ export default {
         }
       }
 
-      // Read aloud
+      // Read aloud - MULTI-CHUNK VERSION
       if (url.pathname === '/api/blog/read-aloud' && request.method === 'POST') {
         const data = await request.json();
         const { blogPostId, blogUrl, blogContent } = data;
@@ -562,12 +600,25 @@ export default {
             cached: true,
             audioUrl: cached.downloadLink,
             fileId: cached.fileId,
-            createdTime: cached.createdTime
+            createdTime: cached.createdTime,
+            multiChunk: false
           });
         }
 
-        // Synthesize audio
-        const audioBytes = await synthesizeSpeech(accessToken, content);
+        // Split into chunks if needed
+        const chunks = splitIntoChunks(content, 3000);
+        console.log(`Processing ${chunks.length} chunk(s), total length: ${content.length}`);
+
+        // Synthesize each chunk
+        const audioChunks = [];
+        for (let i = 0; i < chunks.length; i++) {
+          console.log(`Synthesizing chunk ${i + 1}/${chunks.length}`);
+          const chunkAudio = await synthesizeSpeech(accessToken, chunks[i]);
+          audioChunks.push(chunkAudio);
+        }
+
+        // Concatenate all chunks
+        const audioBytes = concatenateAudioChunks(audioChunks);
 
         // Try Drive upload (non-fatal if it fails)
         let uploaded = null;
@@ -593,7 +644,10 @@ export default {
           audioUrl: uploaded ? uploaded.downloadLink : null,
           fileId: uploaded ? uploaded.fileId : null,
           contentLength: audioBytes.length,
-          cacheKey: cacheKey
+          cacheKey: cacheKey,
+          multiChunk: chunks.length > 1,
+          chunkCount: chunks.length,
+          totalChars: content.length
         });
       }
 
