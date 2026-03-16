@@ -74,17 +74,9 @@ function textToSSML(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // STRONG BREAK AT VERY BEGINNING (after title)
-  ssml = ssml.replace(/^([^\n]+)\n([^\n]+)\n/, '$1<break strength="x-strong" time="2000ms"/>\n$2<break strength="x-strong" time="2000ms"/>\n');
-
-  // PARAGRAPH BREAKS
-  ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1500ms"/>');
-
-  // SENTENCE ENDINGS
-  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break strength="medium" time="800ms"/>$2');
-
-  // COMMA PAUSES
-  ssml = ssml.replace(/,(\s+)/g, ',<break time="300ms"/>$1');
+  // MINIMAL SSML - just basic sentence pauses to avoid size issues
+  // Sentence endings - pause after period, exclamation, question
+  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="500ms"/>$2');
 
   return `<speak>${ssml}</speak>`;
 }
