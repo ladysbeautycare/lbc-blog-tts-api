@@ -74,12 +74,37 @@ function textToSSML(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  ssml = ssml.replace(/\n\n+/g, '<break time="800ms"/>');
-  ssml = ssml.replace(/\n/g, '<break time="400ms"/>');
-  ssml = ssml.replace(/([.!?])\s+/g, '$1<break time="350ms"/> ');
+  // Add LONGER breaks before titles (usually single lines before longer content)
+  // Detect lines that look like titles (short lines followed by longer content)
+  ssml = ssml.replace(/^(.{5,50})(\n)(?=[A-Z])/gm, '$1<break time="1000ms"/><break strength="x-strong"/>\n');
 
-  return `<speak>${ssml}</speak>`;
+  // PARAGRAPH BREAKS - long pause between paragraphs
+  ssml = ssml.replace(/\n\n+/g, '<break time="1200ms"/>');
+
+  // LINE BREAKS - medium pause
+  ssml = ssml.replace(/\n/g, '<break time="600ms"/>');
+
+  // SENTENCE ENDINGS - pause AFTER period, exclamation, question mark
+  // Gives reader time to absorb information
+  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="800ms"/>$2');
+  ssml = ssml.replace(/([.!?])(\s+)(?=[a-z])/g, '$1<break time="400ms"/>$2');
+
+  // COMMA PAUSES - slight pause at commas
+  ssml = ssml.replace(/,(\s+)/g, ',<break time="200ms"/>$1');
+
+  // SEMICOLON PAUSES - medium pause
+  ssml = ssml.replace(/;(\s+)/g, ';<break time="500ms"/>$1');
+
+  // COLON PAUSES - medium pause (often introduces list or explanation)
+  ssml = ssml.replace(/:(\s+)/g, ':<break time="500ms"/>$1');
+
+  return `<speak>
+    <amazon:effect phlegmatic="true">
+      ${ssml}
+    </amazon:effect>
+  </speak>`;
 }
+
 
 async function synthesizeChunk(text, chunkIndex) {
   try {
