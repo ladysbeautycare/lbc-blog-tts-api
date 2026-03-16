@@ -1,6 +1,6 @@
 /**
- * LBC Blog TTS - Render Backend (FIXED % AND $)
- * Reads % as "percent" and $ as "dollar" with proper spacing
+ * LBC Blog TTS - Render Backend (Optimized Streaming)
+ * IMPROVED: % reads as percent, breaks after titles/subtitles/bullets
  */
 
 const express = require('express');
@@ -46,17 +46,21 @@ function splitIntoChunks(text, maxSize = 2000) {
   const chunks = [];
   let current = '';
 
+  // FIRST: Split on major sections (titles/subtitles followed by content)
+  // Detect lines that are titles/subtitles (short, all caps or title case at start of line)
   const sections = text.split(/\n(?=[A-Z][A-Za-z\s]{3,80}(?:\n|$))/);
 
   for (const section of sections) {
     if (!section.trim()) continue;
 
+    // WITHIN each section: split by sentences
     const sentences = section.match(/[^.!?]*[.!?]+/g) || [section];
 
     for (const sentence of sentences) {
       const trimmed = sentence.trim();
       if (!trimmed) continue;
 
+      // If adding this sentence would exceed maxSize, start a new chunk
       if (current.length + trimmed.length > maxSize && current.length > 0) {
         chunks.push(current.trim());
         current = trimmed;
@@ -65,14 +69,18 @@ function splitIntoChunks(text, maxSize = 2000) {
       }
     }
 
+    // End of section - if there's content, add it as a chunk
     if (current.trim()) {
       chunks.push(current.trim());
       current = '';
     }
 
+    // ADD A PAUSE BETWEEN SECTIONS (empty chunk creates 2 second gap)
+    // This forces the frontend to pause between title/subtitle and content
     chunks.push('[PAUSE_2000ms]');
   }
 
+  // Remove trailing pause
   if (chunks.length > 0 && chunks[chunks.length - 1] === '[PAUSE_2000ms]') {
     chunks.pop();
   }
@@ -82,66 +90,42 @@ function splitIntoChunks(text, maxSize = 2000) {
 }
 
 function textToSSML(text) {
-  let ssml = text;
-
-  // REPLACE % with "percent" - add spaces around it
-  // Pattern: number % (like "50%")
-  ssml = ssml.replace(/(\d+)\%/g, '$1 percent');
-  // Pattern: % followed by word (like "%OFF")
-  ssml = ssml.replace(/\%([A-Za-z])/g, 'percent $1');
-  // Pattern: word followed by % (like "DISCOUNT%")
-  ssml = ssml.replace(/([A-Za-z])\%/g, '$1 percent');
-  
-  // REPLACE $ with "dollar" or "dollars" - add spaces around it
-  // Pattern: $number (like "$100")
-  ssml = ssml.replace(/\$(\d+)/g, '$1 dollars');
-  // Pattern: $ followed by word (like "$OFF")
-  ssml = ssml.replace(/\$([A-Za-z])/g, 'dollar $1');
-  // Pattern: word followed by $ (like "PRICE$")
-  ssml = ssml.replace(/([A-Za-z])\$/g, '$1 dollar');
-
-  // REPLACE # with "number" - add spaces
-  // Pattern: #number (like "#1")
-  ssml = ssml.replace(/#(\d+)/g, 'number $1');
-  // Pattern: # followed by word
-  ssml = ssml.replace(/#([A-Za-z])/g, 'number $1');
-
-  // Add spaces between ALL CAPS words (like BLESKIN EXXO)
-  ssml = ssml.replace(/([A-Z]{2,})([A-Z][a-z])/g, '$1 $2');
-  
-  // Add spaces between words and numbers
-  ssml = ssml.replace(/([a-z])(\d)/gi, '$1 $2');
-  ssml = ssml.replace(/(\d)([a-z])/gi, '$1 $2');
-
-  // NOW: Escape XML special chars
-  ssml = ssml.replace(/&/g, '&amp;')
+  let ssml = text
+    // FIRST: Replace special characters with words BEFORE XML escaping
+    .replace(/%/g, ' percent ')
+    .replace(/\$/g, ' dollar ')
+    .replace(/#/g, ' number ')
+    // NOW: Escape XML special chars
+    .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // TITLE BREAKS
+  // TITLE BREAKS - Add strong pause AFTER titles (first line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)/gm, '$1<break strength="x-strong" time="1500ms"/>\n');
 
-  // SUBTITLE BREAKS
+  // SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
 
-  // BULLET POINT BREAKS
+  // BULLET POINT BREAKS - Pause AFTER each bullet point
   ssml = ssml.replace(/([-•*][^\n]+)(\n)/gm, '$1<break strength="medium" time="800ms"/>$2');
 
-  // PARAGRAPH BREAKS
+  // PARAGRAPH BREAKS - Long pause between paragraphs
   ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1000ms"/>');
 
-  // SENTENCE ENDINGS
+  // SENTENCE ENDINGS - Pause after period, exclamation, question mark
   ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="600ms"/>$2');
 
-  // COMMA PAUSES
+  // COMMA PAUSES - Slight pause at commas
   ssml = ssml.replace(/,(\s+)/g, ',<break time="250ms"/>$1');
 
   return `<speak>${ssml}</speak>`;
 }
 
+
 async function synthesizeChunk(text, chunkIndex) {
   try {
+    // Skip pause markers
     if (text === '[PAUSE_2000ms]') {
       return Buffer.from('');
     }
@@ -174,19 +158,22 @@ async function synthesizeChunk(text, chunkIndex) {
   }
 }
 
+// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '3.3.0',
+    version: '3.1.0',
   });
 });
 
+// OPTIMIZED: Generate audio endpoint with streaming response
 app.post('/api/blog/generate-audio', async (req, res) => {
   const startTime = Date.now();
 
   try {
     const { blogContent, blogText, blogUrl, blogPostId } = req.body;
+
     const textContent = blogContent || blogText;
 
     if (!textContent && !blogUrl) {
@@ -201,6 +188,7 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       try {
         const response = await fetch(blogUrl);
         const html = await response.text();
+
         const match = html.match(
           /<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i
         );
@@ -231,6 +219,7 @@ app.post('/api/blog/generate-audio', async (req, res) => {
     const chunks = splitIntoChunks(content, 2000);
     console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
 
+    // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
     const audioChunks = [];
     const synthPromises = chunks.map((chunk, index) =>
       synthesizeChunk(chunk, index)
@@ -248,9 +237,13 @@ app.post('/api/blog/generate-audio', async (req, res) => {
         })
     );
 
+    // Wait for all chunks in parallel
     await Promise.all(synthPromises);
 
+    // Sort to ensure correct order (in case they finish out of order)
     audioChunks.sort((a, b) => a.index - b.index);
+
+    // Filter out empty chunks (pause markers)
     const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
 
     console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
@@ -277,7 +270,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.3 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.1 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
     console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
   });
