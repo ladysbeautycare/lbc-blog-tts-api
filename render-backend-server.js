@@ -1,6 +1,6 @@
 /**
- * LBC Blog TTS - Render Backend (Optimized Streaming)
- * Generates and returns audio chunks immediately as they're ready
+ * LBC Blog TTS - Render Backend (Fixed Audio)
+ * Simpler SSML, proper buffer handling
  */
 
 const express = require('express');
@@ -68,43 +68,21 @@ function splitIntoChunks(text, maxSize = 2000) {
 }
 
 function textToSSML(text) {
+  // Simple SSML without effects that might corrupt data
   let ssml = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // Add LONGER breaks before titles (usually single lines before longer content)
-  // Detect lines that look like titles (short lines followed by longer content)
-  ssml = ssml.replace(/^(.{5,50})(\n)(?=[A-Z])/gm, '$1<break time="1000ms"/><break strength="x-strong"/>\n');
+  // Add breaks for natural pausing
+  ssml = ssml.replace(/\n\n+/g, ' <break time="1200ms"/> ');
+  ssml = ssml.replace(/\n/g, ' <break time="600ms"/> ');
+  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1 <break time="800ms"/> $2');
+  ssml = ssml.replace(/,(\s+)/g, ', <break time="200ms"/> $1');
 
-  // PARAGRAPH BREAKS - long pause between paragraphs
-  ssml = ssml.replace(/\n\n+/g, '<break time="1200ms"/>');
-
-  // LINE BREAKS - medium pause
-  ssml = ssml.replace(/\n/g, '<break time="600ms"/>');
-
-  // SENTENCE ENDINGS - pause AFTER period, exclamation, question mark
-  // Gives reader time to absorb information
-  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="800ms"/>$2');
-  ssml = ssml.replace(/([.!?])(\s+)(?=[a-z])/g, '$1<break time="400ms"/>$2');
-
-  // COMMA PAUSES - slight pause at commas
-  ssml = ssml.replace(/,(\s+)/g, ',<break time="200ms"/>$1');
-
-  // SEMICOLON PAUSES - medium pause
-  ssml = ssml.replace(/;(\s+)/g, ';<break time="500ms"/>$1');
-
-  // COLON PAUSES - medium pause (often introduces list or explanation)
-  ssml = ssml.replace(/:(\s+)/g, ':<break time="500ms"/>$1');
-
-  return `<speak>
-    <amazon:effect phlegmatic="true">
-      ${ssml}
-    </amazon:effect>
-  </speak>`;
+  return `<speak>${ssml}</speak>`;
 }
-
 
 async function synthesizeChunk(text, chunkIndex) {
   try {
@@ -128,8 +106,16 @@ async function synthesizeChunk(text, chunkIndex) {
     };
 
     const [response] = await ttsClient.synthesizeSpeech(request);
-    console.log(`🔊 Chunk ${chunkIndex}: ${response.audioContent.length} bytes`);
-    return response.audioContent;
+    
+    // Get the audio content as Buffer
+    const audioBuffer = response.audioContent;
+    
+    if (!audioBuffer || audioBuffer.length === 0) {
+      throw new Error('Empty audio buffer received');
+    }
+
+    console.log(`🔊 Chunk ${chunkIndex}: ${audioBuffer.length} bytes`);
+    return audioBuffer;
   } catch (error) {
     console.error(`❌ Chunk ${chunkIndex} error:`, error.message);
     throw error;
@@ -141,11 +127,11 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '3.0.0',
+    version: '3.1.0',
   });
 });
 
-// OPTIMIZED: Generate audio endpoint with streaming response
+// Generate audio endpoint
 app.post('/api/blog/generate-audio', async (req, res) => {
   const startTime = Date.now();
 
@@ -195,19 +181,23 @@ app.post('/api/blog/generate-audio', async (req, res) => {
     console.log(`\n📝 Processing blog: ${content.length} chars`);
 
     const chunks = splitIntoChunks(content, 2000);
-    console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
+    console.log(`🎙️  Generating ${chunks.length} audio chunks in parallel...\n`);
 
-    // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
+    // Generate all chunks in parallel
     const audioChunks = [];
     const synthPromises = chunks.map((chunk, index) =>
       synthesizeChunk(chunk, index)
         .then(audioBuffer => {
+          // Convert buffer to base64 string
+          const base64String = audioBuffer.toString('base64');
+          
           audioChunks[index] = {
             index: index,
-            audioBase64: audioBuffer.toString('base64'),
+            audioBase64: base64String,
             textLength: chunk.length,
+            bufferSize: audioBuffer.length,
           };
-          console.log(`✅ Chunk ${index + 1}/${chunks.length} ready`);
+          console.log(`✅ Chunk ${index + 1}/${chunks.length} ready (${audioBuffer.length} bytes)`);
         })
         .catch(error => {
           console.error(`❌ Chunk ${index} failed:`, error.message);
@@ -215,13 +205,14 @@ app.post('/api/blog/generate-audio', async (req, res) => {
         })
     );
 
-    // Wait for all chunks in parallel
     await Promise.all(synthPromises);
 
-    // Sort to ensure correct order (in case they finish out of order)
+    // Sort to ensure correct order
     audioChunks.sort((a, b) => a.index - b.index);
 
-    console.log(`\n✅ All ${audioChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
+    const totalSize = audioChunks.reduce((sum, chunk) => sum + chunk.bufferSize, 0);
+    console.log(`\n✅ All ${audioChunks.length} chunks generated in ${Date.now() - startTime}ms`);
+    console.log(`📊 Total audio size: ${totalSize} bytes\n`);
 
     res.json({
       success: true,
@@ -245,7 +236,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.0 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.1.0 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
     console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
   });
