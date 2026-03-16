@@ -89,22 +89,17 @@ function textToSSML(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // Add natural pauses
-  // Paragraph breaks - long pause
-  ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1200ms"/>');
+  // STRONG BREAK AT VERY BEGINNING (after title)
+  ssml = ssml.replace(/^([^\n]+)\n([^\n]+)\n/, '$1<break strength="x-strong" time="2000ms"/>\n$2<break strength="x-strong" time="2000ms"/>\n');
 
-  // Line breaks - medium pause
-  ssml = ssml.replace(/\n/g, '<break time="600ms"/>');
+  // PARAGRAPH BREAKS
+  ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1500ms"/>');
 
-  // Sentence endings - pause after period, exclamation, question
+  // SENTENCE ENDINGS
   ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break strength="medium" time="800ms"/>$2');
-  ssml = ssml.replace(/([.!?])(\s+)(?=[a-z])/g, '$1<break time="400ms"/>$2');
 
-  // Comma pauses
-  ssml = ssml.replace(/,(\s+)/g, ',<break time="250ms"/>$1');
-
-  // Colon pauses (before lists/explanations)
-  ssml = ssml.replace(/(:)(\s+)/g, '$1<break time="500ms"/>$2');
+  // COMMA PAUSES
+  ssml = ssml.replace(/,(\s+)/g, ',<break time="300ms"/>$1');
 
   return `<speak>${ssml}</speak>`;
 }
