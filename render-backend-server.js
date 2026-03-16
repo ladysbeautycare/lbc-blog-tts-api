@@ -1,6 +1,6 @@
 /**
- * LBC Blog TTS - Render Backend (FIXED % AND $)
- * Reads % as "percent" and $ as "dollar" with proper spacing
+ * LBC Blog TTS - Render Backend (WITH COLON BREAKS)
+ * Reads % as "percent", $ as "dollar", breaks after colons
  */
 
 const express = require('express');
@@ -85,25 +85,17 @@ function textToSSML(text) {
   let ssml = text;
 
   // REPLACE % with "percent" - add spaces around it
-  // Pattern: number % (like "50%")
   ssml = ssml.replace(/(\d+)\%/g, '$1 percent');
-  // Pattern: % followed by word (like "%OFF")
   ssml = ssml.replace(/\%([A-Za-z])/g, 'percent $1');
-  // Pattern: word followed by % (like "DISCOUNT%")
   ssml = ssml.replace(/([A-Za-z])\%/g, '$1 percent');
   
   // REPLACE $ with "dollar" or "dollars" - add spaces around it
-  // Pattern: $number (like "$100")
   ssml = ssml.replace(/\$(\d+)/g, '$1 dollars');
-  // Pattern: $ followed by word (like "$OFF")
   ssml = ssml.replace(/\$([A-Za-z])/g, 'dollar $1');
-  // Pattern: word followed by $ (like "PRICE$")
   ssml = ssml.replace(/([A-Za-z])\$/g, '$1 dollar');
 
   // REPLACE # with "number" - add spaces
-  // Pattern: #number (like "#1")
   ssml = ssml.replace(/#(\d+)/g, 'number $1');
-  // Pattern: # followed by word
   ssml = ssml.replace(/#([A-Za-z])/g, 'number $1');
 
   // Add spaces between ALL CAPS words (like BLESKIN EXXO)
@@ -124,6 +116,9 @@ function textToSSML(text) {
 
   // SUBTITLE BREAKS
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
+
+  // COLON BREAKS - Strong pause after colons for breathing room
+  ssml = ssml.replace(/(:)(\s+)/g, '$1<break strength="strong" time="1200ms"/>$2');
 
   // BULLET POINT BREAKS
   ssml = ssml.replace(/([-•*][^\n]+)(\n)/gm, '$1<break strength="medium" time="800ms"/>$2');
@@ -178,7 +173,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '3.3.0',
+    version: '3.4.0',
   });
 });
 
@@ -277,7 +272,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.3 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.4 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
     console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
   });
