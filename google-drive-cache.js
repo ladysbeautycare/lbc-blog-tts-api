@@ -1,163 +1,143 @@
 /**
- * Google Drive Cache Module
- * Caches TTS audio files to Google Drive using Domain-Wide Delegation
- * Service account impersonates authorized user to access shared folders
+ * Google Drive Cache Module - FIXED
+ * Stores generated audio files on Google Drive for cost savings
+ * Uses direct Buffer upload instead of pipe()
  */
 
 const { google } = require('googleapis');
 const crypto = require('crypto');
 
 class GoogleDriveCache {
-  constructor(serviceAccountJSON, workspaceUserEmail, driveFolderId) {
-    this.serviceAccountJSON = serviceAccountJSON;
+  constructor(serviceAccountJson, workspaceUserEmail, driveFolderId) {
+    this.serviceAccountJson = serviceAccountJson;
     this.workspaceUserEmail = workspaceUserEmail;
     this.driveFolderId = driveFolderId;
+    this.authClient = null;
     this.drive = null;
-    this.memoryCache = new Map(); // 24-hour in-memory cache
-    this.cacheTimeout = 24 * 60 * 60 * 1000; // 24 hours
+    this.memoryCache = new Map();
+    this.cacheTTL = 24 * 60 * 60 * 1000; // 24 hours
   }
 
-  /**
-   * Initialize Drive API with Domain-Wide Delegation
-   * Service account impersonates the workspace user to access shared folders
-   */
   async initialize() {
     try {
-      const auth = new google.auth.JWT({
-        email: this.serviceAccountJSON.client_email,
-        key: this.serviceAccountJSON.private_key,
-        scopes: ['https://www.googleapis.com/auth/drive'],
-        // Domain-Wide Delegation: impersonate authorized user
+      // Create JWT auth with Domain-Wide Delegation
+      this.authClient = new google.auth.JWT({
+        email: this.serviceAccountJson.client_email,
+        key: this.serviceAccountJson.private_key,
+        scopes: [
+          'https://www.googleapis.com/auth/drive',
+          'https://www.googleapis.com/auth/drive.readonly',
+        ],
         subject: this.workspaceUserEmail,
       });
 
-      this.drive = google.drive({ version: 'v3', auth });
-      console.log(`✅ Google Drive Cache initialized (impersonating ${this.workspaceUserEmail})`);
+      // Test auth
+      await this.authClient.authorize();
+
+      // Initialize Drive API
+      this.drive = google.drive({
+        version: 'v3',
+        auth: this.authClient,
+      });
+
+      console.log('✅ Google Drive Cache initialized (Domain-Wide Delegation)');
     } catch (error) {
-      console.error('❌ Drive cache init error:', error.message);
+      console.error('❌ Google Drive Cache init failed:', error.message);
       throw error;
     }
   }
 
-  /**
-   * Generate cache filename from blog content
-   * Format: blog_post_[postId]_[contentHash].mp3
-   */
-  generateCacheFilename(contentHash, postId = null) {
-    return `blog_post_${postId || 'unknown'}_${contentHash}.mp3`;
-  }
-
-  /**
-   * Generate SHA-256 hash of content for unique identification
-   */
-  generateContentHash(content) {
+  generateContentHash(text) {
     return crypto
       .createHash('sha256')
-      .update(content)
+      .update(text)
       .digest('hex')
-      .substring(0, 12); // Use first 12 chars for shorter filename
+      .substring(0, 12);
   }
 
-  /**
-   * Check if audio file exists in Drive cache
-   */
-  async getCachedAudio(contentHash, postId = null) {
+  async getCachedAudio(contentHash, postId) {
     try {
-      const cacheKey = `${postId}_${contentHash}`;
+      const cacheKey = `blog_post_${postId}_${contentHash}.mp3`;
 
       // Check memory cache first (fast)
       if (this.memoryCache.has(cacheKey)) {
         const cached = this.memoryCache.get(cacheKey);
-        if (Date.now() - cached.timestamp < this.cacheTimeout) {
-          console.log(`✅ Cache HIT (memory): ${cacheKey}`);
+        if (Date.now() - cached.timestamp < this.cacheTTL) {
+          console.log(`💾 Memory cache HIT: ${cacheKey}`);
           return cached.data;
         } else {
           this.memoryCache.delete(cacheKey);
         }
       }
 
-      // Query Drive for file
-      const filename = this.generateCacheFilename(contentHash, postId);
-      const query = `name='${filename}' and parents='${this.driveFolderId}' and trashed=false`;
-
+      // Check Drive (slower)
+      const query = `name='${cacheKey}' and parents='${this.driveFolderId}' and trashed=false`;
       const response = await this.drive.files.list({
         q: query,
         spaces: 'drive',
-        fields: 'files(id, name, webContentLink)',
+        fields: 'files(id, name, size)',
         pageSize: 1,
       });
 
       if (response.data.files && response.data.files.length > 0) {
-        const fileId = response.data.files[0].id;
-        console.log(`✅ Cache HIT (Drive): ${filename} (ID: ${fileId})`);
+        const file = response.data.files[0];
+        console.log(`💾 Drive cache HIT: ${file.name} (${file.size} bytes)`);
 
-        // Download file content
-        const fileContent = await this.drive.files.get(
-          { fileId, alt: 'media' },
+        // Download the file
+        const downloadResponse = await this.drive.files.get(
+          { fileId: file.id, alt: 'media' },
           { responseType: 'arraybuffer' }
         );
 
-        // Store in memory for future access
+        const audioBuffer = Buffer.from(downloadResponse.data);
+
+        // Cache in memory for next 24 hours
         this.memoryCache.set(cacheKey, {
-          data: fileContent.data,
+          data: audioBuffer,
           timestamp: Date.now(),
         });
 
-        return fileContent.data;
+        return audioBuffer;
       }
 
-      console.log(`⏭️  Cache MISS: ${filename}`);
+      console.log(`⏭️  Cache MISS: ${cacheKey}`);
       return null;
     } catch (error) {
-      console.error(`⚠️  Cache lookup error: ${error.message}`);
-      // Don't throw — let it fall through to generate fresh audio
-      return null;
+      console.error(`⚠️  Cache read error: ${error.message}`);
+      return null; // Graceful fallback
     }
   }
 
-  /**
-   * Save audio file to Google Drive
-   */
-  async saveAudioCache(audioBuffer, contentHash, postId = null) {
+  async saveAudioCache(audioBuffer, contentHash, postId) {
     try {
-      const filename = this.generateCacheFilename(contentHash, postId);
-      const cacheKey = `${postId}_${contentHash}`;
-
-      // Check if file already exists to avoid duplicates
-      const query = `name='${filename}' and parents='${this.driveFolderId}' and trashed=false`;
-      const existing = await this.drive.files.list({
-        q: query,
-        spaces: 'drive',
-        fields: 'files(id)',
-        pageSize: 1,
-      });
-
-      if (existing.data.files && existing.data.files.length > 0) {
-        console.log(`📦 File already cached: ${filename}`);
-        return existing.data.files[0].id;
+      if (!Buffer.isBuffer(audioBuffer)) {
+        throw new Error('audioBuffer must be a Buffer');
       }
 
-      // Upload new file
+      const cacheKey = `blog_post_${postId}_${contentHash}.mp3`;
+
+      console.log(`💾 Saving to Drive: ${cacheKey} (${audioBuffer.length} bytes)`);
+
+      // Create file metadata
       const fileMetadata = {
-        name: filename,
+        name: cacheKey,
         parents: [this.driveFolderId],
-        description: `TTS cache - Post ${postId} - ${new Date().toISOString()}`,
-      };
-
-      const media = {
         mimeType: 'audio/mpeg',
-        body: audioBuffer,
       };
 
+      // Upload using Buffer (NO PIPE)
       const response = await this.drive.files.create({
         resource: fileMetadata,
-        media: media,
-        fields: 'id, name',
+        media: {
+          mimeType: 'audio/mpeg',
+          body: audioBuffer, // Direct Buffer, not a stream
+        },
+        fields: 'id, name, size',
       });
 
-      console.log(`✅ Cached to Drive: ${filename} (ID: ${response.data.id})`);
+      console.log(`✅ Cached to Drive: ${response.data.name} (ID: ${response.data.id})`);
 
-      // Store in memory cache
+      // Also cache in memory
       this.memoryCache.set(cacheKey, {
         data: audioBuffer,
         timestamp: Date.now(),
@@ -165,50 +145,38 @@ class GoogleDriveCache {
 
       return response.data.id;
     } catch (error) {
-      console.error(`❌ Cache save error: ${error.message}`);
-      // Don't throw — caching failure shouldn't break TTS
+      console.error(`⚠️  Cache save error: ${error.message}`);
+      // Don't throw - caching is optional
       return null;
     }
   }
 
-  /**
-   * Clean up old cache files (older than 48 hours)
-   * Run periodically to save Drive storage
-   */
-  async cleanupOldCache(maxAgeHours = 48) {
+  async cleanupOldCache(daysOld = 7) {
     try {
-      const cutoffTime = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
-      const query = `parents='${this.driveFolderId}' and createdTime<'${cutoffTime.toISOString()}' and trashed=false`;
+      const cutoffTime = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
 
+      const query = `parents='${this.driveFolderId}' and createdTime<'${cutoffTime.toISOString()}' and trashed=false`;
       const response = await this.drive.files.list({
         q: query,
         spaces: 'drive',
-        fields: 'files(id, name, createdTime)',
-        pageSize: 100,
+        fields: 'files(id, name)',
       });
 
       if (response.data.files && response.data.files.length > 0) {
-        console.log(`🧹 Cleaning up ${response.data.files.length} old cache files...`);
+        console.log(`🗑️  Cleaning up ${response.data.files.length} old cache files...`);
 
         for (const file of response.data.files) {
           await this.drive.files.delete({ fileId: file.id });
           console.log(`  ✓ Deleted: ${file.name}`);
         }
+
+        console.log(`✅ Cleanup complete`);
       } else {
-        console.log(`✅ No old cache files to clean up`);
+        console.log(`✅ No old cache files to delete`);
       }
     } catch (error) {
       console.error(`⚠️  Cleanup error: ${error.message}`);
-      // Don't throw — cleanup failure isn't critical
     }
-  }
-
-  /**
-   * Clear memory cache (useful for testing)
-   */
-  clearMemoryCache() {
-    this.memoryCache.clear();
-    console.log('🧹 Memory cache cleared');
   }
 }
 
