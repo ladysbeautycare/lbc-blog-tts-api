@@ -121,6 +121,28 @@ function textToSSML(text) {
   // SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
 
+  // FIX ABBREVIATIONS WITH APOSTROPHES
+  // SA's → South Australia's
+  ssml = ssml.replace(/\bSA's\b/gi, "South Australia's");
+  ssml = ssml.replace(/\bSAs\b/gi, "South Australia's");
+  
+  // FIX COMMON ABBREVIATIONS - spell them out with dots
+  ssml = ssml.replace(/\bFAQ\b/gi, 'F.A.Q.');
+  ssml = ssml.replace(/\bFAQs\b/gi, 'F.A.Q.s');
+  ssml = ssml.replace(/\bLED\b/gi, 'L.E.D.');
+  ssml = ssml.replace(/\bHIFU\b/gi, 'H.I.F.U.');
+  ssml = ssml.replace(/\bIPL\b/gi, 'I.P.L.');
+  ssml = ssml.replace(/\bSHR\b/gi, 'S.H.R.');
+  ssml = ssml.replace(/\bTGA\b/gi, 'T.G.A.');
+  ssml = ssml.replace(/\bUV\b/gi, 'U.V.');
+  ssml = ssml.replace(/\bAHA\b/gi, 'A.H.A.');
+  ssml = ssml.replace(/\bBHA\b/gi, 'B.H.A.');
+  ssml = ssml.replace(/\bAHAs\b/gi, 'A.H.A.s');
+  ssml = ssml.replace(/\bBHAs\b/gi, 'B.H.A.s');
+  ssml = ssml.replace(/\bSPF\b/gi, 'S.P.F.');
+  ssml = ssml.replace(/\bNIR\b/gi, 'N.I.R.');
+  ssml = ssml.replace(/\bPCOS\b/gi, 'P.C.O.S.');
+  
   // BULLET POINT BREAKS - Pause AFTER each bullet point
   ssml = ssml.replace(/([-•*][^\n]+?)(?=\n)/gm, '$1<break strength="medium" time="800ms"/>');
 
