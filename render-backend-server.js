@@ -1,6 +1,6 @@
 /**
- * LBC Blog TTS - Render Backend with Google Drive Caching
- * IMPROVED: Multi-chunk, SSML, caching, % reads as percent, breaks after titles/subtitles/bullets
+ * LBC Blog TTS - Render Backend v3.2
+ * ORIGINAL v3.1 (working perfectly) + Google Drive Caching
  */
 
 const express = require('express');
@@ -18,10 +18,7 @@ let driveCache;
 async function initializeGoogle() {
   try {
     const serviceAccountKeyString = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-    const googleProjectId = process.env.GOOGLE_PROJECT_ID;
-    const workspaceUserEmail = process.env.GOOGLE_WORKSPACE_USER_EMAIL;
-    const driveFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl';
-
+    
     if (!serviceAccountKeyString) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
     }
@@ -35,15 +32,17 @@ async function initializeGoogle() {
       );
     }
 
-    // Initialize TTS Client
     ttsClient = new TextToSpeechClient({
       credentials: serviceAccountJSON,
-      projectId: googleProjectId,
+      projectId: process.env.GOOGLE_PROJECT_ID
     });
 
     console.log('✅ Google Cloud TTS initialized');
 
     // Initialize Drive Cache (if workspace email is provided)
+    const workspaceUserEmail = process.env.GOOGLE_WORKSPACE_USER_EMAIL;
+    const driveFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl';
+
     if (workspaceUserEmail) {
       driveCache = new GoogleDriveCache(
         serviceAccountJSON,
@@ -55,6 +54,7 @@ async function initializeGoogle() {
     } else {
       console.log('⚠️  GOOGLE_WORKSPACE_USER_EMAIL not set - caching disabled');
     }
+
   } catch (error) {
     console.error('❌ Google Cloud init error:', error.message);
     process.exit(1);
@@ -66,6 +66,7 @@ function splitIntoChunks(text, maxSize = 2000) {
   let current = '';
 
   // FIRST: Split on major sections (titles/subtitles followed by content)
+  // Detect lines that are titles/subtitles (short, all caps or title case at start of line)
   const sections = text.split(/\n(?=[A-Z][A-Za-z\s]{3,80}(?:\n|$))/);
 
   for (const section of sections) {
@@ -93,7 +94,8 @@ function splitIntoChunks(text, maxSize = 2000) {
       current = '';
     }
 
-    // ADD A PAUSE BETWEEN SECTIONS
+    // ADD A PAUSE BETWEEN SECTIONS (empty chunk creates 2 second gap)
+    // This forces the frontend to pause between title/subtitle and content
     chunks.push('[PAUSE_2000ms]');
   }
 
@@ -118,26 +120,27 @@ function textToSSML(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // TITLE BREAKS
+  // TITLE BREAKS - Add strong pause AFTER titles (first line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)/gm, '$1<break strength="x-strong" time="1500ms"/>\n');
 
-  // SUBTITLE BREAKS
+  // SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
 
-  // BULLET POINT BREAKS
+  // BULLET POINT BREAKS - Pause AFTER each bullet point
   ssml = ssml.replace(/([-•*][^\n]+)(\n)/gm, '$1<break strength="medium" time="800ms"/>$2');
 
-  // PARAGRAPH BREAKS
+  // PARAGRAPH BREAKS - Long pause between paragraphs
   ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1000ms"/>');
 
-  // SENTENCE ENDINGS
+  // SENTENCE ENDINGS - Pause after period, exclamation, question mark
   ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="600ms"/>$2');
 
-  // COMMA PAUSES
+  // COMMA PAUSES - Slight pause at commas
   ssml = ssml.replace(/,(\s+)/g, ',<break time="250ms"/>$1');
 
   return `<speak>${ssml}</speak>`;
 }
+
 
 async function synthesizeChunk(text, chunkIndex) {
   try {
@@ -179,7 +182,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '4.0.0',
+    version: '3.2.0',
     caching: driveCache ? 'enabled' : 'disabled',
   });
 });
@@ -265,6 +268,7 @@ app.post('/api/blog/generate-audio', async (req, res) => {
     const chunks = splitIntoChunks(content, 2000);
     console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
 
+    // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
     const synthPromises = chunks.map((chunk, index) =>
       synthesizeChunk(chunk, index)
         .then(audioBuffer => {
@@ -281,9 +285,13 @@ app.post('/api/blog/generate-audio', async (req, res) => {
         })
     );
 
+    // Wait for all chunks in parallel
     await Promise.all(synthPromises);
 
+    // Sort to ensure correct order (in case they finish out of order)
     audioChunks.sort((a, b) => a.index - b.index);
+
+    // Filter out empty chunks (pause markers)
     const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
 
     console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
@@ -316,33 +324,9 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       generationTime: Date.now() - startTime,
       fromCache: false,
     });
+
   } catch (error) {
     console.error('❌ Error:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// Cache management endpoint (optional)
-app.post('/api/cache/cleanup', async (req, res) => {
-  try {
-    if (!driveCache) {
-      return res.status(400).json({
-        success: false,
-        error: 'Drive caching not enabled',
-      });
-    }
-
-    await driveCache.cleanupOldCache(48); // 48 hours
-
-    res.json({
-      success: true,
-      message: 'Cache cleanup completed',
-    });
-  } catch (error) {
-    console.error('❌ Cleanup error:', error.message);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -355,12 +339,9 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v4.0 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.2 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
-    console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio`);
-    if (driveCache) {
-      console.log(`📍 Cache cleanup: POST http://localhost:${PORT}/api/cache/cleanup\n`);
-    }
+    console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
   });
 }
 
