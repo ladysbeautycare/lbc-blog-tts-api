@@ -1,7 +1,7 @@
 /**
- * Google Drive Cache Module - FIXED
+ * Google Drive Cache Module - ULTRA FIXED
  * Stores generated audio files on Google Drive for cost savings
- * Uses direct Buffer upload instead of pipe()
+ * Simplified to avoid googleapis stream/pipe issues
  */
 
 const { google } = require('googleapis');
@@ -111,29 +111,29 @@ class GoogleDriveCache {
   async saveAudioCache(audioBuffer, contentHash, postId) {
     try {
       if (!Buffer.isBuffer(audioBuffer)) {
-        throw new Error('audioBuffer must be a Buffer');
+        console.warn(`⚠️  audioBuffer is not a Buffer, skipping cache`);
+        return null;
       }
 
       const cacheKey = `blog_post_${postId}_${contentHash}.mp3`;
 
       console.log(`💾 Saving to Drive: ${cacheKey} (${audioBuffer.length} bytes)`);
 
-      // Create file metadata
-      const fileMetadata = {
-        name: cacheKey,
-        parents: [this.driveFolderId],
-        mimeType: 'audio/mpeg',
-      };
-
-      // Upload using Buffer (NO PIPE)
-      const response = await this.drive.files.create({
-        resource: fileMetadata,
-        media: {
-          mimeType: 'audio/mpeg',
-          body: audioBuffer, // Direct Buffer, not a stream
-        },
-        fields: 'id, name, size',
-      });
+      // ULTRA SIMPLE: Just upload the Buffer directly
+      const response = await this.drive.files.create(
+        {
+          requestBody: {
+            name: cacheKey,
+            parents: [this.driveFolderId],
+            mimeType: 'audio/mpeg',
+          },
+          media: {
+            mimeType: 'audio/mpeg',
+            body: audioBuffer,
+          },
+          fields: 'id, name, size',
+        }
+      );
 
       console.log(`✅ Cached to Drive: ${response.data.name} (ID: ${response.data.id})`);
 
