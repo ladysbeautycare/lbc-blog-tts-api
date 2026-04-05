@@ -1,19 +1,18 @@
 /**
- * LBC Blog TTS - Render Backend v3.2
- * ORIGINAL v3.1 (working perfectly) + Google Drive Caching
+ * LBC Blog TTS - Render Backend v3.2.1
+ * ORIGINAL v3.1 WITHOUT Google Drive Caching (to fix immediate issues)
+ * Caching will be added back after testing
  */
 
 const express = require('express');
 const cors = require('cors');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
-const GoogleDriveCache = require('./google-drive-cache');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
 let ttsClient;
-let driveCache;
 
 async function initializeGoogle() {
   try {
@@ -38,22 +37,6 @@ async function initializeGoogle() {
     });
 
     console.log('✅ Google Cloud TTS initialized');
-
-    // Initialize Drive Cache (if workspace email is provided)
-    const workspaceUserEmail = process.env.GOOGLE_WORKSPACE_USER_EMAIL;
-    const driveFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl';
-
-    if (workspaceUserEmail) {
-      driveCache = new GoogleDriveCache(
-        serviceAccountJSON,
-        workspaceUserEmail,
-        driveFolderId
-      );
-      await driveCache.initialize();
-      console.log('✅ Google Drive Cache initialized');
-    } else {
-      console.log('⚠️  GOOGLE_WORKSPACE_USER_EMAIL not set - caching disabled');
-    }
 
   } catch (error) {
     console.error('❌ Google Cloud init error:', error.message);
@@ -194,12 +177,12 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '3.2.0',
-    caching: driveCache ? 'enabled' : 'disabled',
+    version: '3.2.1',
+    caching: 'disabled',
   });
 });
 
-// OPTIMIZED: Generate audio endpoint with caching
+// OPTIMIZED: Generate audio endpoint (NO CACHING for now)
 app.post('/api/blog/generate-audio', async (req, res) => {
   const startTime = Date.now();
 
@@ -248,39 +231,12 @@ app.post('/api/blog/generate-audio', async (req, res) => {
 
     console.log(`\n📝 Processing blog: ${content.length} chars`);
 
-    // STEP 1: Check Drive cache
-    let audioChunks = [];
-    let fromCache = false;
-
-    if (driveCache) {
-      const contentHash = driveCache.generateContentHash(content);
-      const cachedAudio = await driveCache.getCachedAudio(contentHash, blogPostId);
-
-      if (cachedAudio) {
-        console.log(`💾 Using cached audio (full)`);
-        fromCache = true;
-        return res.json({
-          success: true,
-          audioChunks: [
-            {
-              index: 0,
-              audioBase64: Buffer.from(cachedAudio).toString('base64'),
-              textLength: content.length,
-            },
-          ],
-          totalChunks: 1,
-          totalChars: content.length,
-          generationTime: Date.now() - startTime,
-          fromCache: true,
-        });
-      }
-    }
-
-    // STEP 2: Generate fresh audio chunks
+    // Generate fresh audio chunks
     const chunks = splitIntoChunks(content, 2000);
     console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
 
     // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
+    const audioChunks = [];
     const synthPromises = chunks.map((chunk, index) =>
       synthesizeChunk(chunk, index)
         .then(audioBuffer => {
@@ -306,34 +262,13 @@ app.post('/api/blog/generate-audio', async (req, res) => {
     // Filter out empty chunks (pause markers)
     const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
 
-    console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
-
-    // STEP 3: Cache the audio to Drive (combine chunks into single MP3)
-    if (driveCache && validChunks.length > 0) {
-      try {
-        // Combine all audio chunks for caching
-        const audioBuffers = validChunks
-          .filter(c => c.audioBase64)
-          .map(c => Buffer.from(c.audioBase64, 'base64'));
-
-        if (audioBuffers.length > 0) {
-          const combinedAudio = Buffer.concat(audioBuffers);
-          const contentHash = driveCache.generateContentHash(content);
-
-          await driveCache.saveAudioCache(combinedAudio, contentHash, blogPostId);
-        }
-      } catch (cacheError) {
-        console.error(`⚠️  Cache save failed: ${cacheError.message}`);
-        // Don't fail the request - caching is optional
-      }
-    }
-
     // Calculate estimated duration for each chunk (rough estimate: ~150 chars per second)
-    const estimatedDuration = validChunks.map((chunk, idx) => {
-      const chunkText = chunks[idx] || '';
+    const estimatedDurations = chunks.map(chunkText => {
       const estimatedSeconds = Math.ceil(chunkText.length / 150);
       return estimatedSeconds;
     });
+
+    console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
 
     res.json({
       success: true,
@@ -342,7 +277,7 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       totalChars: content.length,
       generationTime: Date.now() - startTime,
       fromCache: false,
-      estimatedDurations: estimatedDuration,
+      estimatedDurations: estimatedDurations,
     });
 
   } catch (error) {
@@ -359,7 +294,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.2 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.2.1 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
     console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
   });
