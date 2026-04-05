@@ -110,6 +110,18 @@ function splitIntoChunks(text, maxSize = 2000) {
 
 function textToSSML(text) {
   let ssml = text
+    // CRITICAL FIX: Handle number ranges FIRST, before any other replacements
+    // Convert "50–60" or "50-60" to "50 to 60"
+    // Match: digit + (en-dash OR em-dash OR hyphen) + digit
+    .replace(/(\d+)\s*–\s*(\d+)/g, '$1 to $2')   // en-dash: 50–60 → 50 to 60
+    .replace(/(\d+)\s*—\s*(\d+)/g, '$1 to $2')   // em-dash: 50—60 → 50 to 60
+    .replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2')   // hyphen: 50-60 → 50 to 60
+    // Handle ranges with symbols: "50–60°C" → "50 to 60 degrees Celsius"
+    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
+    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
+    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)%/g, '$1 to $2 percent')
+    // Remove degree symbol (will be replaced with words)
+    .replace(/°/g, ' degrees ')
     // FIRST: Replace special characters with words BEFORE XML escaping
     .replace(/%/g, ' percent ')
     .replace(/\$/g, ' dollar ')
@@ -127,7 +139,7 @@ function textToSSML(text) {
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
 
   // BULLET POINT BREAKS - Pause AFTER each bullet point
-  ssml = ssml.replace(/([-•*][^\n]+)(\n)/gm, '$1<break strength="medium" time="800ms"/>$2');
+  ssml = ssml.replace(/([-•*][^\n]+?)(?=\n)/gm, '$1<break strength="medium" time="800ms"/>');
 
   // PARAGRAPH BREAKS - Long pause between paragraphs
   ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1000ms"/>');
@@ -316,6 +328,13 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       }
     }
 
+    // Calculate estimated duration for each chunk (rough estimate: ~150 chars per second)
+    const estimatedDuration = validChunks.map((chunk, idx) => {
+      const chunkText = chunks[idx] || '';
+      const estimatedSeconds = Math.ceil(chunkText.length / 150);
+      return estimatedSeconds;
+    });
+
     res.json({
       success: true,
       audioChunks: validChunks,
@@ -323,6 +342,7 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       totalChars: content.length,
       generationTime: Date.now() - startTime,
       fromCache: false,
+      estimatedDurations: estimatedDuration,
     });
 
   } catch (error) {
