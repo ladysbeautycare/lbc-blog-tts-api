@@ -1,328 +1,381 @@
 /**
- * LBC Blog TTS - Render Backend v3.2.1
- * ORIGINAL v3.1 WITHOUT Google Drive Caching (to fix immediate issues)
- * Caching will be added back after testing
- */
 
-const express = require('express');
-const cors = require('cors');
-const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
+- LBC Blog TTS - Render Backend v3.2
+- ORIGINAL v3.1 (working perfectly) + Google Drive Caching
+  */
+
+const express = require(‘express’);
+const cors = require(‘cors’);
+const { TextToSpeechClient } = require(’@google-cloud/text-to-speech’);
+const GoogleDriveCache = require(’./google-drive-cache’);
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: ‘50mb’ }));
 app.use(cors());
 
 let ttsClient;
+let driveCache;
 
 async function initializeGoogle() {
-  try {
-    const serviceAccountKeyString = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-    
-    if (!serviceAccountKeyString) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
-    }
+try {
+const serviceAccountKeyString = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 
-    let serviceAccountJSON;
-    try {
-      serviceAccountJSON = JSON.parse(serviceAccountKeyString);
-    } catch (e) {
-      serviceAccountJSON = JSON.parse(
-        Buffer.from(serviceAccountKeyString, 'base64').toString()
-      );
-    }
+```
+if (!serviceAccountKeyString) {
+  throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
+}
 
-    ttsClient = new TextToSpeechClient({
-      credentials: serviceAccountJSON,
-      projectId: process.env.GOOGLE_PROJECT_ID
-    });
+let serviceAccountJSON;
+try {
+  serviceAccountJSON = JSON.parse(serviceAccountKeyString);
+} catch (e) {
+  serviceAccountJSON = JSON.parse(
+    Buffer.from(serviceAccountKeyString, 'base64').toString()
+  );
+}
 
-    console.log('✅ Google Cloud TTS initialized');
+ttsClient = new TextToSpeechClient({
+  credentials: serviceAccountJSON,
+  projectId: process.env.GOOGLE_PROJECT_ID
+});
 
-  } catch (error) {
-    console.error('❌ Google Cloud init error:', error.message);
-    process.exit(1);
-  }
+console.log('✅ Google Cloud TTS initialized');
+
+// Initialize Drive Cache (if workspace email is provided)
+const workspaceUserEmail = process.env.GOOGLE_WORKSPACE_USER_EMAIL;
+const driveFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1BBY-9sfGExHSLv_R2Y8Oznk5OMKhNDfl';
+
+if (workspaceUserEmail) {
+  driveCache = new GoogleDriveCache(
+    serviceAccountJSON,
+    workspaceUserEmail,
+    driveFolderId
+  );
+  await driveCache.initialize();
+  console.log('✅ Google Drive Cache initialized');
+} else {
+  console.log('⚠️  GOOGLE_WORKSPACE_USER_EMAIL not set - caching disabled');
+}
+```
+
+} catch (error) {
+console.error(‘❌ Google Cloud init error:’, error.message);
+process.exit(1);
+}
 }
 
 function splitIntoChunks(text, maxSize = 2000) {
-  const chunks = [];
-  let current = '';
+const chunks = [];
+let current = ‘’;
 
-  // FIRST: Split on major sections (titles/subtitles followed by content)
-  // Detect lines that are titles/subtitles (short, all caps or title case at start of line)
-  const sections = text.split(/\n(?=[A-Z][A-Za-z\s]{3,80}(?:\n|$))/);
+// FIRST: Split on major sections (titles/subtitles followed by content)
+// Detect lines that are titles/subtitles (short, all caps or title case at start of line)
+const sections = text.split(/\n(?=[A-Z][A-Za-z\s]{3,80}(?:\n|$))/);
 
-  for (const section of sections) {
-    if (!section.trim()) continue;
+for (const section of sections) {
+if (!section.trim()) continue;
 
-    // WITHIN each section: split by sentences
-    const sentences = section.match(/[^.!?]*[.!?]+/g) || [section];
+```
+// WITHIN each section: split by sentences
+const sentences = section.match(/[^.!?]*[.!?]+/g) || [section];
 
-    for (const sentence of sentences) {
-      const trimmed = sentence.trim();
-      if (!trimmed) continue;
+for (const sentence of sentences) {
+  const trimmed = sentence.trim();
+  if (!trimmed) continue;
 
-      // If adding this sentence would exceed maxSize, start a new chunk
-      if (current.length + trimmed.length > maxSize && current.length > 0) {
-        chunks.push(current.trim());
-        current = trimmed;
-      } else {
-        current += (current ? ' ' : '') + trimmed;
-      }
-    }
-
-    // End of section - if there's content, add it as a chunk
-    if (current.trim()) {
-      chunks.push(current.trim());
-      current = '';
-    }
-
-    // ADD A PAUSE BETWEEN SECTIONS (empty chunk creates 2 second gap)
-    // This forces the frontend to pause between title/subtitle and content
-    chunks.push('[PAUSE_2000ms]');
+  // If adding this sentence would exceed maxSize, start a new chunk
+  if (current.length + trimmed.length > maxSize && current.length > 0) {
+    chunks.push(current.trim());
+    current = trimmed;
+  } else {
+    current += (current ? ' ' : '') + trimmed;
   }
+}
 
-  // Remove trailing pause
-  if (chunks.length > 0 && chunks[chunks.length - 1] === '[PAUSE_2000ms]') {
-    chunks.pop();
-  }
+// End of section - if there's content, add it as a chunk
+if (current.trim()) {
+  chunks.push(current.trim());
+  current = '';
+}
 
-  console.log(`📄 Split into ${chunks.length} chunks (including pauses)`);
-  return chunks;
+// ADD A PAUSE BETWEEN SECTIONS (empty chunk creates 2 second gap)
+// This forces the frontend to pause between title/subtitle and content
+chunks.push('[PAUSE_2000ms]');
+```
+
+}
+
+// Remove trailing pause
+if (chunks.length > 0 && chunks[chunks.length - 1] === ‘[PAUSE_2000ms]’) {
+chunks.pop();
+}
+
+console.log(`📄 Split into ${chunks.length} chunks (including pauses)`);
+return chunks;
 }
 
 function textToSSML(text) {
-  let ssml = text
-    // CRITICAL FIX: Handle number ranges FIRST, before any other replacements
-    // Convert "50–60" or "50-60" to "50 to 60"
-    // Match: digit + (en-dash OR em-dash OR hyphen) + digit
-    .replace(/(\d+)\s*–\s*(\d+)/g, '$1 to $2')   // en-dash: 50–60 → 50 to 60
-    .replace(/(\d+)\s*—\s*(\d+)/g, '$1 to $2')   // em-dash: 50—60 → 50 to 60
-    .replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2')   // hyphen: 50-60 → 50 to 60
-    // Handle ranges with symbols: "50–60°C" → "50 to 60 degrees Celsius"
-    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
-    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
-    .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)%/g, '$1 to $2 percent')
-    // Remove degree symbol (will be replaced with words)
-    .replace(/°/g, ' degrees ')
-    // FIRST: Replace special characters with words BEFORE XML escaping
-    .replace(/%/g, ' percent ')
-    .replace(/\$/g, ' dollar ')
-    .replace(/#/g, ' number ')
-    // NOW: Escape XML special chars
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+let ssml = text
+// CRITICAL FIX: Handle number ranges FIRST, before any other replacements
+// Convert “50–60” or “50-60” to “50 to 60”
+// Match: digit + (en-dash OR em-dash OR hyphen) + digit
+.replace(/(\d+)\s*–\s*(\d+)/g, ‘$1 to $2’)   // en-dash: 50–60 → 50 to 60
+.replace(/(\d+)\s*—\s*(\d+)/g, ‘$1 to $2’)   // em-dash: 50—60 → 50 to 60
+.replace(/(\d+)\s*-\s*(\d+)/g, ‘$1 to $2’)   // hyphen: 50-60 → 50 to 60
+// Handle ranges with symbols: “50–60°C” → “50 to 60 degrees Celsius”
+.replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*C/gi, ‘$1 to $2 degrees Celsius’)
+.replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*F/gi, ‘$1 to $2 degrees Fahrenheit’)
+.replace(/(\d+)\s*(?:–|—|-)\s*(\d+)%/g, ‘$1 to $2 percent’)
+// Remove degree symbol (will be replaced with words)
+.replace(/°/g, ’ degrees ’)
+// FIRST: Replace special characters with words BEFORE XML escaping
+.replace(/%/g, ’ percent ’)
+.replace(/$/g, ’ dollar ’)
+.replace(/#/g, ’ number ’)
+// NOW: Escape XML special chars
+.replace(/&/g, ‘&’)
+.replace(/</g, ‘<’)
+.replace(/>/g, ‘>’)
+.replace(/”/g, ‘"’);
 
-  // TITLE BREAKS - Add strong pause AFTER titles (first line)
-  ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)/gm, '$1<break strength="x-strong" time="1500ms"/>\n');
+// TITLE BREAKS - Add strong pause AFTER titles (first line)
+ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)/gm, ‘$1<break strength="x-strong" time="1500ms"/>\n’);
 
-  // SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
-  ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
+// SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
+ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, ‘$1<break strength="strong" time="1200ms"/>\n’);
 
-  // FIX ABBREVIATIONS WITH APOSTROPHES
-  // SA's → South Australia's
-  ssml = ssml.replace(/\bSA's\b/gi, "South Australia's");
-  ssml = ssml.replace(/\bSAs\b/gi, "South Australia's");
-  
-  // FIX COMMON ABBREVIATIONS - spell them out with dots
-  ssml = ssml.replace(/\bFAQ\b/gi, 'F.A.Q.');
-  ssml = ssml.replace(/\bFAQs\b/gi, 'F.A.Q.s');
-  ssml = ssml.replace(/\bLED\b/gi, 'L.E.D.');
-  ssml = ssml.replace(/\bHIFU\b/gi, 'H.I.F.U.');
-  ssml = ssml.replace(/\bIPL\b/gi, 'I.P.L.');
-  ssml = ssml.replace(/\bSHR\b/gi, 'S.H.R.');
-  ssml = ssml.replace(/\bTGA\b/gi, 'T.G.A.');
-  ssml = ssml.replace(/\bUV\b/gi, 'U.V.');
-  ssml = ssml.replace(/\bAHA\b/gi, 'A.H.A.');
-  ssml = ssml.replace(/\bBHA\b/gi, 'B.H.A.');
-  ssml = ssml.replace(/\bAHAs\b/gi, 'A.H.A.s');
-  ssml = ssml.replace(/\bBHAs\b/gi, 'B.H.A.s');
-  ssml = ssml.replace(/\bSPF\b/gi, 'S.P.F.');
-  ssml = ssml.replace(/\bNIR\b/gi, 'N.I.R.');
-  ssml = ssml.replace(/\bPCOS\b/gi, 'P.C.O.S.');
-  
-  // BULLET POINT BREAKS - Pause AFTER each bullet point
-  ssml = ssml.replace(/([-•*][^\n]+?)(?=\n)/gm, '$1<break strength="medium" time="800ms"/>');
+// BULLET POINT BREAKS - Pause AFTER each bullet point
+ssml = ssml.replace(/([-•*][^\n]+?)(?=\n)/gm, ‘$1<break strength="medium" time="800ms"/>’);
 
-  // PARAGRAPH BREAKS - Long pause between paragraphs
-  ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1000ms"/>');
+// PARAGRAPH BREAKS - Long pause between paragraphs
+ssml = ssml.replace(/\n\n+/g, ‘<break strength="strong" time="1000ms"/>’);
 
-  // SENTENCE ENDINGS - Pause after period, exclamation, question mark
-  ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="600ms"/>$2');
+// SENTENCE ENDINGS - Pause after period, exclamation, question mark
+ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, ‘$1<break time="600ms"/>$2’);
 
-  // COMMA PAUSES - Slight pause at commas
-  ssml = ssml.replace(/,(\s+)/g, ',<break time="250ms"/>$1');
+// COMMA PAUSES - Slight pause at commas
+ssml = ssml.replace(/,(\s+)/g, ‘,<break time="250ms"/>$1’);
 
-  return `<speak>${ssml}</speak>`;
+return `<speak>${ssml}</speak>`;
 }
 
-
 async function synthesizeChunk(text, chunkIndex) {
-  try {
-    // Skip pause markers
-    if (text === '[PAUSE_2000ms]') {
-      return Buffer.from('');
-    }
+try {
+// Skip pause markers
+if (text === ‘[PAUSE_2000ms]’) {
+return Buffer.from(’’);
+}
 
-    const ssml = textToSSML(text);
-    const ssmlSize = Buffer.byteLength(ssml, 'utf8');
+```
+const ssml = textToSSML(text);
+const ssmlSize = Buffer.byteLength(ssml, 'utf8');
 
-    if (ssmlSize > 4800) {
-      throw new Error(`SSML too large: ${ssmlSize} bytes`);
-    }
+if (ssmlSize > 4800) {
+  throw new Error(`SSML too large: ${ssmlSize} bytes`);
+}
 
-    const request = {
-      input: { ssml },
-      voice: {
-        languageCode: 'en-AU',
-        name: 'en-AU-Neural2-C',
-      },
-      audioConfig: {
-        audioEncoding: 'MP3',
-        speakingRate: 0.92,
-      },
-    };
+const request = {
+  input: { ssml },
+  voice: {
+    languageCode: 'en-AU',
+    name: 'en-AU-Neural2-C',
+  },
+  audioConfig: {
+    audioEncoding: 'MP3',
+    speakingRate: 0.92,
+  },
+};
 
-    const [response] = await ttsClient.synthesizeSpeech(request);
-    console.log(`🔊 Chunk ${chunkIndex}: ${response.audioContent.length} bytes`);
-    return response.audioContent;
-  } catch (error) {
-    console.error(`❌ Chunk ${chunkIndex} error:`, error.message);
-    throw error;
-  }
+const [response] = await ttsClient.synthesizeSpeech(request);
+console.log(`🔊 Chunk ${chunkIndex}: ${response.audioContent.length} bytes`);
+return response.audioContent;
+```
+
+} catch (error) {
+console.error(`❌ Chunk ${chunkIndex} error:`, error.message);
+throw error;
+}
 }
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    service: 'LBC Blog TTS Render Backend',
-    version: '3.2.1',
-    caching: 'disabled',
-  });
+app.get(’/health’, (req, res) => {
+res.json({
+status: ‘healthy’,
+service: ‘LBC Blog TTS Render Backend’,
+version: ‘3.2.0’,
+caching: driveCache ? ‘enabled’ : ‘disabled’,
+});
 });
 
-// OPTIMIZED: Generate audio endpoint (NO CACHING for now)
-app.post('/api/blog/generate-audio', async (req, res) => {
-  const startTime = Date.now();
+// OPTIMIZED: Generate audio endpoint with caching
+app.post(’/api/blog/generate-audio’, async (req, res) => {
+const startTime = Date.now();
 
+try {
+const { blogContent, blogText, blogUrl, blogPostId } = req.body;
+
+```
+const textContent = blogContent || blogText;
+
+if (!textContent && !blogUrl) {
+  return res.status(400).json({
+    success: false,
+    error: 'Missing blogContent/blogText or blogUrl',
+  });
+}
+
+let content = textContent;
+if (!content && blogUrl) {
   try {
-    const { blogContent, blogText, blogUrl, blogPostId } = req.body;
+    const response = await fetch(blogUrl);
+    const html = await response.text();
 
-    const textContent = blogContent || blogText;
-
-    if (!textContent && !blogUrl) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing blogContent/blogText or blogUrl',
-      });
-    }
-
-    let content = textContent;
-    if (!content && blogUrl) {
-      try {
-        const response = await fetch(blogUrl);
-        const html = await response.text();
-
-        const match = html.match(
-          /<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i
-        );
-        if (match) {
-          content = match[1]
-            .replace(/<[^>]+>/g, '')
-            .replace(/&amp;/g, ' and ')
-            .replace(/&nbsp;/g, ' ')
-            .trim();
-        }
-      } catch (fetchError) {
-        return res.status(400).json({
-          success: false,
-          error: 'Could not fetch blog content',
-        });
-      }
-    }
-
-    if (!content || content.length < 100) {
-      return res.status(400).json({
-        success: false,
-        error: 'Content too short or empty',
-      });
-    }
-
-    console.log(`\n📝 Processing blog: ${content.length} chars`);
-
-    // Generate fresh audio chunks
-    const chunks = splitIntoChunks(content, 2000);
-    console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
-
-    // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
-    const audioChunks = [];
-    const synthPromises = chunks.map((chunk, index) =>
-      synthesizeChunk(chunk, index)
-        .then(audioBuffer => {
-          audioChunks[index] = {
-            index: index,
-            audioBase64: audioBuffer.length > 0 ? audioBuffer.toString('base64') : '',
-            textLength: chunk.length,
-          };
-          console.log(`✅ Chunk ${index + 1}/${chunks.length} ready`);
-        })
-        .catch(error => {
-          console.error(`❌ Chunk ${index} failed:`, error.message);
-          throw error;
-        })
+    const match = html.match(
+      /<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i
     );
-
-    // Wait for all chunks in parallel
-    await Promise.all(synthPromises);
-
-    // Sort to ensure correct order (in case they finish out of order)
-    audioChunks.sort((a, b) => a.index - b.index);
-
-    // Filter out empty chunks (pause markers)
-    const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
-
-    // Calculate estimated duration for each chunk (rough estimate: ~150 chars per second)
-    const estimatedDurations = chunks.map(chunkText => {
-      const estimatedSeconds = Math.ceil(chunkText.length / 150);
-      return estimatedSeconds;
-    });
-
-    console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
-
-    res.json({
-      success: true,
-      audioChunks: validChunks,
-      totalChunks: validChunks.length,
-      totalChars: content.length,
-      generationTime: Date.now() - startTime,
-      fromCache: false,
-      estimatedDurations: estimatedDurations,
-    });
-
-  } catch (error) {
-    console.error('❌ Error:', error.message);
-    res.status(500).json({
+    if (match) {
+      content = match[1]
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, ' and ')
+        .replace(/&nbsp;/g, ' ')
+        .trim();
+    }
+  } catch (fetchError) {
+    return res.status(400).json({
       success: false,
-      error: error.message,
+      error: 'Could not fetch blog content',
     });
   }
+}
+
+if (!content || content.length < 100) {
+  return res.status(400).json({
+    success: false,
+    error: 'Content too short or empty',
+  });
+}
+
+console.log(`\n📝 Processing blog: ${content.length} chars`);
+
+// STEP 1: Check Drive cache
+let audioChunks = [];
+let fromCache = false;
+
+if (driveCache) {
+  const contentHash = driveCache.generateContentHash(content);
+  const cachedAudio = await driveCache.getCachedAudio(contentHash, blogPostId);
+
+  if (cachedAudio) {
+    console.log(`💾 Using cached audio (full)`);
+    fromCache = true;
+    return res.json({
+      success: true,
+      audioChunks: [
+        {
+          index: 0,
+          audioBase64: Buffer.from(cachedAudio).toString('base64'),
+          textLength: content.length,
+        },
+      ],
+      totalChunks: 1,
+      totalChars: content.length,
+      generationTime: Date.now() - startTime,
+      fromCache: true,
+    });
+  }
+}
+
+// STEP 2: Generate fresh audio chunks
+const chunks = splitIntoChunks(content, 2000);
+console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
+
+// OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
+const synthPromises = chunks.map((chunk, index) =>
+  synthesizeChunk(chunk, index)
+    .then(audioBuffer => {
+      audioChunks[index] = {
+        index: index,
+        audioBase64: audioBuffer.length > 0 ? audioBuffer.toString('base64') : '',
+        textLength: chunk.length,
+      };
+      console.log(`✅ Chunk ${index + 1}/${chunks.length} ready`);
+    })
+    .catch(error => {
+      console.error(`❌ Chunk ${index} failed:`, error.message);
+      throw error;
+    })
+);
+
+// Wait for all chunks in parallel
+await Promise.all(synthPromises);
+
+// Sort to ensure correct order (in case they finish out of order)
+audioChunks.sort((a, b) => a.index - b.index);
+
+// Filter out empty chunks (pause markers)
+const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
+
+console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
+
+// STEP 3: Cache the audio to Drive (combine chunks into single MP3)
+if (driveCache && validChunks.length > 0) {
+  try {
+    // Combine all audio chunks for caching
+    const audioBuffers = validChunks
+      .filter(c => c.audioBase64)
+      .map(c => Buffer.from(c.audioBase64, 'base64'));
+
+    if (audioBuffers.length > 0) {
+      const combinedAudio = Buffer.concat(audioBuffers);
+      const contentHash = driveCache.generateContentHash(content);
+
+      await driveCache.saveAudioCache(combinedAudio, contentHash, blogPostId);
+    }
+  } catch (cacheError) {
+    console.error(`⚠️  Cache save failed: ${cacheError.message}`);
+    // Don't fail the request - caching is optional
+  }
+}
+
+// Calculate estimated duration for each chunk (rough estimate: ~150 chars per second)
+const estimatedDuration = validChunks.map((chunk, idx) => {
+  const chunkText = chunks[idx] || '';
+  const estimatedSeconds = Math.ceil(chunkText.length / 150);
+  return estimatedSeconds;
+});
+
+res.json({
+  success: true,
+  audioChunks: validChunks,
+  totalChunks: validChunks.length,
+  totalChars: content.length,
+  generationTime: Date.now() - startTime,
+  fromCache: false,
+  estimatedDurations: estimatedDuration,
+});
+```
+
+} catch (error) {
+console.error(‘❌ Error:’, error.message);
+res.status(500).json({
+success: false,
+error: error.message,
+});
+}
 });
 
 const PORT = process.env.PORT || 3000;
 
 async function start() {
-  await initializeGoogle();
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.2.1 running on port ${PORT}`);
-    console.log(`📍 Health: http://localhost:${PORT}/health`);
-    console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
-  });
+await initializeGoogle();
+app.listen(PORT, ‘0.0.0.0’, () => {
+console.log(`\n🚀 LBC Blog TTS Render Backend v3.2 running on port ${PORT}`);
+console.log(`📍 Health: http://localhost:${PORT}/health`);
+console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
+});
 }
 
 start().catch(error => {
-  console.error('Failed to start:', error.message);
-  process.exit(1);
+console.error(‘Failed to start:’, error.message);
+process.exit(1);
 });
