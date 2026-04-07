@@ -1,18 +1,21 @@
 /**
- * LBC Blog TTS - Render Backend v3.2.1
- * ORIGINAL v3.1 WITHOUT Google Drive Caching (to fix immediate issues)
- * Caching will be added back after testing
+ * LBC Blog TTS - Render Backend v3.3
+ * RESTORED: Google Drive Caching RE-ENABLED
+ * First check cache, then generate fresh audio, then save to cache
  */
 
 const express = require('express');
 const cors = require('cors');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
+const { google } = require('googleapis');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
 let ttsClient;
+let driveClient;
 
 async function initializeGoogle() {
   try {
@@ -36,7 +39,17 @@ async function initializeGoogle() {
       projectId: process.env.GOOGLE_PROJECT_ID
     });
 
+    // Initialize Google Drive for caching
+    driveClient = google.drive({
+      version: 'v3',
+      auth: new google.auth.GoogleAuth({
+        credentials: serviceAccountJSON,
+        scopes: ['https://www.googleapis.com/auth/drive'],
+      }),
+    });
+
     console.log('✅ Google Cloud TTS initialized');
+    console.log('✅ Google Drive caching initialized');
 
   } catch (error) {
     console.error('❌ Google Cloud init error:', error.message);
@@ -44,25 +57,89 @@ async function initializeGoogle() {
   }
 }
 
+function generateContentHash(content) {
+  return crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
+}
+
+async function checkDriveCache(contentHash, blogPostId) {
+  try {
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+    if (!folderId) {
+      console.log('⚠️  No GOOGLE_DRIVE_FOLDER_ID set, skipping cache check');
+      return null;
+    }
+
+    const fileName = `audio_${blogPostId}_${contentHash}.mp3`;
+    
+    const response = await driveClient.files.list({
+      q: `name='${fileName}' and '${folderId}' in parents and trashed=false`,
+      spaces: 'drive',
+      fields: 'files(id, name, size)',
+      pageSize: 1,
+    });
+
+    if (response.data.files && response.data.files.length > 0) {
+      const file = response.data.files[0];
+      console.log(`💾 Found cached audio: ${file.name} (${file.size} bytes)`);
+      
+      const mediaResponse = await driveClient.files.get(
+        { fileId: file.id, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      );
+      
+      return Buffer.from(mediaResponse.data);
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`⚠️  Cache check failed: ${error.message}`);
+    return null;
+  }
+}
+
+async function saveDriveCache(audioBuffer, contentHash, blogPostId) {
+  try {
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+    if (!folderId) {
+      console.log('⚠️  No GOOGLE_DRIVE_FOLDER_ID set, skipping cache save');
+      return;
+    }
+
+    const fileName = `audio_${blogPostId}_${contentHash}.mp3`;
+
+    const response = await driveClient.files.create({
+      resource: {
+        name: fileName,
+        parents: [folderId],
+        mimeType: 'audio/mpeg',
+      },
+      media: {
+        mimeType: 'audio/mpeg',
+        body: audioBuffer,
+      },
+    });
+
+    console.log(`✅ Audio cached to Drive: ${response.data.name}`);
+  } catch (error) {
+    console.error(`⚠️  Cache save failed: ${error.message}`);
+  }
+}
+
 function splitIntoChunks(text, maxSize = 2000) {
   const chunks = [];
   let current = '';
 
-  // FIRST: Split on major sections (titles/subtitles followed by content)
-  // Detect lines that are titles/subtitles (short, all caps or title case at start of line)
   const sections = text.split(/\n(?=[A-Z][A-Za-z\s]{3,80}(?:\n|$))/);
 
   for (const section of sections) {
     if (!section.trim()) continue;
 
-    // WITHIN each section: split by sentences
     const sentences = section.match(/[^.!?]*[.!?]+/g) || [section];
 
     for (const sentence of sentences) {
       const trimmed = sentence.trim();
       if (!trimmed) continue;
 
-      // If adding this sentence would exceed maxSize, start a new chunk
       if (current.length + trimmed.length > maxSize && current.length > 0) {
         chunks.push(current.trim());
         current = trimmed;
@@ -71,18 +148,14 @@ function splitIntoChunks(text, maxSize = 2000) {
       }
     }
 
-    // End of section - if there's content, add it as a chunk
     if (current.trim()) {
       chunks.push(current.trim());
       current = '';
     }
 
-    // ADD A PAUSE BETWEEN SECTIONS (empty chunk creates 2 second gap)
-    // This forces the frontend to pause between title/subtitle and content
     chunks.push('[PAUSE_2000ms]');
   }
 
-  // Remove trailing pause
   if (chunks.length > 0 && chunks[chunks.length - 1] === '[PAUSE_2000ms]') {
     chunks.pop();
   }
@@ -93,40 +166,27 @@ function splitIntoChunks(text, maxSize = 2000) {
 
 function textToSSML(text) {
   let ssml = text
-    // CRITICAL FIX: Handle number ranges FIRST, before any other replacements
-    // Convert "50–60" or "50-60" to "50 to 60"
-    // Match: digit + (en-dash OR em-dash OR hyphen) + digit
-    .replace(/(\d+)\s*–\s*(\d+)/g, '$1 to $2')   // en-dash: 50–60 → 50 to 60
-    .replace(/(\d+)\s*—\s*(\d+)/g, '$1 to $2')   // em-dash: 50—60 → 50 to 60
-    .replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2')   // hyphen: 50-60 → 50 to 60
-    // Handle ranges with symbols: "50–60°C" → "50 to 60 degrees Celsius"
+    .replace(/(\d+)\s*–\s*(\d+)/g, '$1 to $2')
+    .replace(/(\d+)\s*—\s*(\d+)/g, '$1 to $2')
+    .replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)%/g, '$1 to $2 percent')
-    // Remove degree symbol (will be replaced with words)
     .replace(/°/g, ' degrees ')
-    // FIRST: Replace special characters with words BEFORE XML escaping
     .replace(/%/g, ' percent ')
     .replace(/\$/g, ' dollar ')
     .replace(/#/g, ' number ')
-    // NOW: Escape XML special chars
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // TITLE BREAKS - Add strong pause AFTER titles (first line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)/gm, '$1<break strength="x-strong" time="1500ms"/>\n');
-
-  // SUBTITLE BREAKS - Add pause AFTER subtitles (second line)
   ssml = ssml.replace(/^([A-Z][A-Za-z0-9\s]{5,80})(\n)(?=[A-Z])/gm, '$1<break strength="strong" time="1200ms"/>\n');
 
-  // FIX ABBREVIATIONS WITH APOSTROPHES
-  // SA's → South Australia's
   ssml = ssml.replace(/\bSA's\b/gi, "South Australia's");
   ssml = ssml.replace(/\bSAs\b/gi, "South Australia's");
   
-  // FIX COMMON ABBREVIATIONS - spell them out with dots
   ssml = ssml.replace(/\bFAQ\b/gi, 'F.A.Q.');
   ssml = ssml.replace(/\bFAQs\b/gi, 'F.A.Q.s');
   ssml = ssml.replace(/\bLED\b/gi, 'L.E.D.');
@@ -143,25 +203,16 @@ function textToSSML(text) {
   ssml = ssml.replace(/\bNIR\b/gi, 'N.I.R.');
   ssml = ssml.replace(/\bPCOS\b/gi, 'P.C.O.S.');
   
-  // BULLET POINT BREAKS - Pause AFTER each bullet point
   ssml = ssml.replace(/([-•*][^\n]+?)(?=\n)/gm, '$1<break strength="medium" time="800ms"/>');
-
-  // PARAGRAPH BREAKS - Long pause between paragraphs
   ssml = ssml.replace(/\n\n+/g, '<break strength="strong" time="1000ms"/>');
-
-  // SENTENCE ENDINGS - Pause after period, exclamation, question mark
   ssml = ssml.replace(/([.!?])(\s+)(?=[A-Z])/g, '$1<break time="600ms"/>$2');
-
-  // COMMA PAUSES - Slight pause at commas
   ssml = ssml.replace(/,(\s+)/g, ',<break time="250ms"/>$1');
 
   return `<speak>${ssml}</speak>`;
 }
 
-
 async function synthesizeChunk(text, chunkIndex) {
   try {
-    // Skip pause markers
     if (text === '[PAUSE_2000ms]') {
       return Buffer.from('');
     }
@@ -199,18 +250,17 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     service: 'LBC Blog TTS Render Backend',
-    version: '3.2.1',
-    caching: 'disabled',
+    version: '3.3',
+    caching: 'enabled',
   });
 });
 
-// OPTIMIZED: Generate audio endpoint (NO CACHING for now)
+// GENERATE AUDIO with CACHING
 app.post('/api/blog/generate-audio', async (req, res) => {
   const startTime = Date.now();
 
   try {
     const { blogContent, blogText, blogUrl, blogPostId } = req.body;
-
     const textContent = blogContent || blogText;
 
     if (!textContent && !blogUrl) {
@@ -225,7 +275,6 @@ app.post('/api/blog/generate-audio', async (req, res) => {
       try {
         const response = await fetch(blogUrl);
         const html = await response.text();
-
         const match = html.match(
           /<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i
         );
@@ -253,11 +302,35 @@ app.post('/api/blog/generate-audio', async (req, res) => {
 
     console.log(`\n📝 Processing blog: ${content.length} chars`);
 
-    // Generate fresh audio chunks
+    const contentHash = generateContentHash(content);
+    
+    // STEP 1: Check cache first
+    console.log('🔍 Checking Google Drive cache...');
+    const cachedAudio = await checkDriveCache(contentHash, blogPostId);
+    
+    if (cachedAudio) {
+      console.log(`✅ Using cached audio (${cachedAudio.length} bytes)`);
+      const chunks = splitIntoChunks(content, 2000);
+      const audioChunks = [{
+        index: 0,
+        audioBase64: cachedAudio.toString('base64'),
+        isCached: true,
+      }];
+      
+      return res.json({
+        success: true,
+        audioChunks: audioChunks,
+        totalChunks: 1,
+        totalChars: content.length,
+        generationTime: Date.now() - startTime,
+        fromCache: true,
+      });
+    }
+
+    // STEP 2: Generate fresh audio
     const chunks = splitIntoChunks(content, 2000);
     console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
 
-    // OPTIMIZATION: Generate chunks in PARALLEL (not sequential)
     const audioChunks = [];
     const synthPromises = chunks.map((chunk, index) =>
       synthesizeChunk(chunk, index)
@@ -275,22 +348,30 @@ app.post('/api/blog/generate-audio', async (req, res) => {
         })
     );
 
-    // Wait for all chunks in parallel
     await Promise.all(synthPromises);
-
-    // Sort to ensure correct order (in case they finish out of order)
     audioChunks.sort((a, b) => a.index - b.index);
-
-    // Filter out empty chunks (pause markers)
     const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
 
-    // Calculate estimated duration for each chunk (rough estimate: ~150 chars per second)
     const estimatedDurations = chunks.map(chunkText => {
       const estimatedSeconds = Math.ceil(chunkText.length / 150);
       return estimatedSeconds;
     });
 
-    console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms\n`);
+    console.log(`\n✅ All ${validChunks.length} chunks generated in ${Date.now() - startTime}ms`);
+
+    // STEP 3: Cache the combined audio
+    console.log('💾 Saving to Google Drive cache...');
+    const combinedAudio = Buffer.concat(
+      validChunks.map(chunk => 
+        chunk.audioBase64 ? Buffer.from(chunk.audioBase64, 'base64') : Buffer.from('')
+      )
+    );
+    
+    try {
+      await saveDriveCache(combinedAudio, contentHash, blogPostId);
+    } catch (cacheError) {
+      console.error(`⚠️  Cache save failed: ${cacheError.message}`);
+    }
 
     res.json({
       success: true,
@@ -316,9 +397,10 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initializeGoogle();
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 LBC Blog TTS Render Backend v3.2.1 running on port ${PORT}`);
+    console.log(`\n🚀 LBC Blog TTS Render Backend v3.3 running on port ${PORT}`);
     console.log(`📍 Health: http://localhost:${PORT}/health`);
-    console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio\n`);
+    console.log(`📍 Generate: POST http://localhost:${PORT}/api/blog/generate-audio`);
+    console.log(`📍 Google Drive Caching: ENABLED\n`);
   });
 }
 
