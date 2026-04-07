@@ -117,11 +117,14 @@ async function saveDriveCache(audioBuffer, contentHash, blogPostId) {
         mimeType: 'audio/mpeg',
         body: audioBuffer,
       },
+      fields: 'id, name, size',
     });
 
-    console.log(`✅ Audio cached to Drive: ${response.data.name}`);
+    console.log(`✅ Audio cached to Drive: ${response.data.name} (${audioBuffer.length} bytes)`);
+    return response.data.id;
   } catch (error) {
     console.error(`⚠️  Cache save failed: ${error.message}`);
+    return null;
   }
 }
 
