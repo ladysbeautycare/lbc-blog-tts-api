@@ -227,6 +227,10 @@ function cleanTextForChirp(text) {
     .replace(/(\d+(?:\.\d+)?)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+(?:\.\d+)?)\s*%/g, '$1 to $2 percent')
     // Generic number range (catches everything else, incl. decimals)
     .replace(/(\d+(?:\.\d+)?)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+(?:\.\d+)?)/g, '$1 to $2')
+    // Decimal point between digits -> spoken " point " so the period does
+    // NOT get treated as a sentence break (which caused a breath after "0").
+    // e.g. "0.3 to 4.0" -> "0 point 3 to 4 point 0"
+    .replace(/(\d)\.(\d)/g, '$1 point $2')
     // Units & symbols -> words
     .replace(/(\d+)\s*°\s*C/gi, '$1 degrees Celsius')
     .replace(/(\d+)\s*°\s*F/gi, '$1 degrees Fahrenheit')
