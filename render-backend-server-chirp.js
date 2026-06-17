@@ -19,6 +19,7 @@ const cors = require('cors');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
 const { google } = require('googleapis');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -125,6 +126,11 @@ async function saveDriveCache(audioBuffer, contentHash, blogPostId) {
 
     const fileName = `audio_chirp_${blogPostId}_${contentHash}.mp3`;
 
+    // googleapis needs a readable STREAM for the body, not a raw Buffer
+    const bufferStream = new Readable();
+    bufferStream.push(audioBuffer);
+    bufferStream.push(null);
+
     const response = await driveClient.files.create({
       resource: {
         name: fileName,
@@ -133,7 +139,7 @@ async function saveDriveCache(audioBuffer, contentHash, blogPostId) {
       },
       media: {
         mimeType: 'audio/mpeg',
-        body: audioBuffer,
+        body: bufferStream,
       },
       fields: 'id, name, size',
     });
@@ -187,23 +193,29 @@ function splitIntoChunks(text, maxSize = 2000) {
 // naturally on its own.
 function cleanTextForChirp(text) {
   let t = text
-    // Ranges with units FIRST (most specific)
+    // Ranges WITH units first (most specific)
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(min(?:ute)?s?)\b/gi, '$1 to $2 minutes')
-    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(cm|mm|m|km)\b/gi, '$1 to $2 $3')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(hr?s?|hours?)\b/gi, '$1 to $2 hours')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(cm|mm|km|m)\b/gi, '$1 to $2 $3')
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*%/g, '$1 to $2 percent')
-    // Generic number range (catches the rest)
+    // Generic number range (catches everything else)
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)/g, '$1 to $2')
-    // Remaining symbols
+    // Units & symbols -> words
+    .replace(/(\d+)\s*°\s*C/gi, '$1 degrees Celsius')
+    .replace(/(\d+)\s*°\s*F/gi, '$1 degrees Fahrenheit')
     .replace(/°/g, ' degrees ')
     .replace(/(\d+)\s*%/g, '$1 percent')
     .replace(/%/g, ' percent ')
     .replace(/\$\s*(\d+)/g, '$1 dollars')
     .replace(/\$/g, ' dollars ')
     .replace(/#/g, ' number ')
+    // Booking URL -> spoken
     .replace(/https?:\/\/ladysbeautycare\.com\.au\/booking\/?/gi, 'ladys beauty care dot com dot au slash booking')
+    // Strip any other URLs
     .replace(/https?:\/\/\S+/g, '')
+    // Acronym pronunciation (plain phonetic — Chirp reads these naturally)
     .replace(/\bSA's\b/g, "South Australia's")
     .replace(/\bSAs\b/g, "South Australia's")
     .replace(/\bHIFU\b/gi, 'High-Foo')
@@ -221,10 +233,14 @@ function cleanTextForChirp(text) {
     .replace(/\bPCOS\b/gi, 'P C O S')
     .replace(/\bFAQs\b/gi, 'F A Qs')
     .replace(/\bFAQ\b/gi, 'F A Q')
+    // Bullet markers -> sentence break (period gives Chirp a natural pause)
     .replace(/^\s*[-•*]\s*/gm, '')
+    // Collapse whitespace
     .replace(/\n{2,}/g, '\n\n')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
+
+  console.log('CHIRP OUT:', JSON.stringify(t.substring(0, 250)));
   return t;
 }
 
