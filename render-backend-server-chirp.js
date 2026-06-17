@@ -247,6 +247,8 @@ function cleanTextForChirp(text) {
     // Acronym pronunciation (plain phonetic — Chirp reads these naturally)
     .replace(/\bSA's\b/g, "South Australia's")
     .replace(/\bSAs\b/g, "South Australia's")
+    // Name pronunciation: "Zeda" should sound like "Zeeda" (long ee)
+    .replace(/\bZeda\b/g, 'Zeeda')
     .replace(/\bHIFU\b/gi, 'High-Foo')
     .replace(/\bIPL\b/gi, 'I P L')
     .replace(/\bSHR\b/gi, 'S H R')
