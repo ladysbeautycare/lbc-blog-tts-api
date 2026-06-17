@@ -187,22 +187,23 @@ function splitIntoChunks(text, maxSize = 2000) {
 // naturally on its own.
 function cleanTextForChirp(text) {
   let t = text
-    // Number ranges: every dash type -> "to"
-    .replace(/(\d)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d)/g, '$1 to $2')
-    // Units & symbols -> words
-    .replace(/(\d+)\s*°\s*C/gi, '$1 degrees Celsius')
-    .replace(/(\d+)\s*°\s*F/gi, '$1 degrees Fahrenheit')
+    // Ranges with units FIRST (most specific)
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(min(?:ute)?s?)\b/gi, '$1 to $2 minutes')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(cm|mm|m|km)\b/gi, '$1 to $2 $3')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*%/g, '$1 to $2 percent')
+    // Generic number range (catches the rest)
+    .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)/g, '$1 to $2')
+    // Remaining symbols
     .replace(/°/g, ' degrees ')
     .replace(/(\d+)\s*%/g, '$1 percent')
     .replace(/%/g, ' percent ')
     .replace(/\$\s*(\d+)/g, '$1 dollars')
     .replace(/\$/g, ' dollars ')
     .replace(/#/g, ' number ')
-    // Booking URL -> spoken
     .replace(/https?:\/\/ladysbeautycare\.com\.au\/booking\/?/gi, 'ladys beauty care dot com dot au slash booking')
-    // Strip any other URLs
     .replace(/https?:\/\/\S+/g, '')
-    // Acronym pronunciation (plain phonetic — Chirp reads these naturally)
     .replace(/\bSA's\b/g, "South Australia's")
     .replace(/\bSAs\b/g, "South Australia's")
     .replace(/\bHIFU\b/gi, 'High-Foo')
@@ -220,13 +221,10 @@ function cleanTextForChirp(text) {
     .replace(/\bPCOS\b/gi, 'P C O S')
     .replace(/\bFAQs\b/gi, 'F A Qs')
     .replace(/\bFAQ\b/gi, 'F A Q')
-    // Bullet markers -> sentence break (period gives Chirp a natural pause)
     .replace(/^\s*[-•*]\s*/gm, '')
-    // Collapse whitespace
     .replace(/\n{2,}/g, '\n\n')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
-
   return t;
 }
 
