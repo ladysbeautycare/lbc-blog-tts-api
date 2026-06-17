@@ -231,7 +231,7 @@ async function synthesizeChunk(text, chunkIndex) {
       input: { ssml },
       voice: {
         languageCode: 'en-AU',
-        name: 'en-AU-Neural2-C',
+        name: 'en-AU-Wavenet-C',
       },
       audioConfig: {
         audioEncoding: 'MP3',
