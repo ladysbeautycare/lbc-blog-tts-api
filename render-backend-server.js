@@ -169,9 +169,7 @@ function splitIntoChunks(text, maxSize = 2000) {
 
 function textToSSML(text) {
   let ssml = text
-    .replace(/(\d+)\s*–\s*(\d+)/g, '$1 to $2')
-    .replace(/(\d+)\s*—\s*(\d+)/g, '$1 to $2')
-    .replace(/(\d+)\s*-\s*(\d+)/g, '$1 to $2')
+    .replace(/(\d)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d)/g, '$1 to $2')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*C/gi, '$1 to $2 degrees Celsius')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)\s*°\s*F/gi, '$1 to $2 degrees Fahrenheit')
     .replace(/(\d+)\s*(?:–|—|-)\s*(\d+)%/g, '$1 to $2 percent')
