@@ -269,33 +269,50 @@ function cleanTextForChirp(text) {
 }
 
 async function synthesizeChunk(text, chunkIndex) {
-  try {
-    if (text === '[PAUSE_2000ms]') {
-      return Buffer.from('');
-    }
-
-    const plainText = cleanTextForChirp(text);
-
-    // Chirp uses plain text input (NOT ssml)
-    const request = {
-      input: { text: plainText },
-      voice: {
-        languageCode: 'en-AU',
-        name: VOICE_NAME,
-      },
-      audioConfig: {
-        audioEncoding: 'MP3',
-        speakingRate: SPEAKING_RATE,
-      },
-    };
-
-    const [response] = await ttsClient.synthesizeSpeech(request);
-    console.log(`🔊 Chunk ${chunkIndex}: ${response.audioContent.length} bytes`);
-    return response.audioContent;
-  } catch (error) {
-    console.error(`❌ Chunk ${chunkIndex} error:`, error.message);
-    throw error;
+  if (text === '[PAUSE_2000ms]') {
+    return Buffer.from('');
   }
+
+  const plainText = cleanTextForChirp(text);
+
+  // Chirp uses plain text input (NOT ssml)
+  const request = {
+    input: { text: plainText },
+    voice: {
+      languageCode: 'en-AU',
+      name: VOICE_NAME,
+    },
+    audioConfig: {
+      audioEncoding: 'MP3',
+      speakingRate: SPEAKING_RATE,
+    },
+  };
+
+  // Retry transient Google errors (13 INTERNAL, 14 UNAVAILABLE, 8 RESOURCE_EXHAUSTED)
+  // which occur under burst load. Up to 4 attempts with increasing backoff.
+  const MAX_ATTEMPTS = 4;
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const [response] = await ttsClient.synthesizeSpeech(request);
+      console.log(`🔊 Chunk ${chunkIndex}: ${response.audioContent.length} bytes` + (attempt > 1 ? ` (attempt ${attempt})` : ''));
+      return response.audioContent;
+    } catch (error) {
+      lastError = error;
+      const code = error.code;
+      const retryable = code === 13 || code === 14 || code === 8 ||
+                        /INTERNAL|UNAVAILABLE|RESOURCE_EXHAUSTED|deadline/i.test(error.message || '');
+      if (retryable && attempt < MAX_ATTEMPTS) {
+        const waitMs = 500 * attempt + Math.floor(Math.random() * 400);
+        console.warn(`⚠️  Chunk ${chunkIndex} attempt ${attempt} failed (${error.message}). Retrying in ${waitMs}ms...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      console.error(`❌ Chunk ${chunkIndex} error:`, error.message);
+      throw error;
+    }
+  }
+  throw lastError;
 }
 
 // Health check
@@ -362,23 +379,32 @@ app.post('/api/blog/generate-audio', async (req, res) => {
     console.log(`🎙️  Generating ${chunks.length} audio chunks...\n`);
 
     const audioChunks = [];
-    const synthPromises = chunks.map((chunk, index) =>
-      synthesizeChunk(chunk, index)
-        .then(audioBuffer => {
-          audioChunks[index] = {
-            index: index,
-            audioBase64: audioBuffer.length > 0 ? audioBuffer.toString('base64') : '',
-            textLength: chunk.length,
-          };
-          console.log(`✅ Chunk ${index + 1}/${chunks.length} ready`);
-        })
-        .catch(error => {
-          console.error(`❌ Chunk ${index} failed:`, error.message);
-          throw error;
-        })
-    );
 
-    await Promise.all(synthPromises);
+    // Process in small batches to avoid overwhelming Google TTS with a burst
+    // of parallel requests (which caused random 13 INTERNAL errors on Chirp).
+    const CONCURRENCY = 3;
+    for (let start = 0; start < chunks.length; start += CONCURRENCY) {
+      const batch = chunks.slice(start, start + CONCURRENCY);
+      await Promise.all(
+        batch.map((chunk, offset) => {
+          const index = start + offset;
+          return synthesizeChunk(chunk, index)
+            .then(audioBuffer => {
+              audioChunks[index] = {
+                index: index,
+                audioBase64: audioBuffer.length > 0 ? audioBuffer.toString('base64') : '',
+                textLength: chunk.length,
+              };
+              console.log(`✅ Chunk ${index + 1}/${chunks.length} ready`);
+            })
+            .catch(error => {
+              console.error(`❌ Chunk ${index} failed permanently:`, error.message);
+              throw error;
+            });
+        })
+      );
+    }
+
     audioChunks.sort((a, b) => a.index - b.index);
     const validChunks = audioChunks.filter(c => c.audioBase64 || c.audioBase64 === '');
 
