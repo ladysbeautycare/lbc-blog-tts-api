@@ -63,12 +63,19 @@ async function initializeGoogle() {
       auth: new google.auth.GoogleAuth({
         credentials: serviceAccountJSON,
         scopes: ['https://www.googleapis.com/auth/drive'],
+        clientOptions: process.env.GOOGLE_DRIVE_IMPERSONATE_USER
+          ? { subject: process.env.GOOGLE_DRIVE_IMPERSONATE_USER }
+          : {},
       }),
     });
 
     console.log('✅ Google Cloud TTS initialized (Chirp 3: HD)');
     console.log(`✅ Voice: ${VOICE_NAME}`);
-    console.log('✅ Google Drive caching initialized');
+    if (process.env.GOOGLE_DRIVE_IMPERSONATE_USER) {
+      console.log(`✅ Google Drive caching initialized (impersonating ${process.env.GOOGLE_DRIVE_IMPERSONATE_USER})`);
+    } else {
+      console.log('⚠️  Drive caching WITHOUT impersonation — saves will fail (service account has no quota)');
+    }
 
   } catch (error) {
     console.error('❌ Google Cloud init error:', error.message);
@@ -193,6 +200,20 @@ function splitIntoChunks(text, maxSize = 2000) {
 // naturally on its own.
 function cleanTextForChirp(text) {
   let t = text
+    // FIRST: decode HTML entities for dashes & spaces so ranges match.
+    // WordPress often passes these through un-decoded (e.g. 2&#8211;3).
+    .replace(/&ndash;/gi, '\u2013')
+    .replace(/&mdash;/gi, '\u2014')
+    .replace(/&#8211;/g, '\u2013')
+    .replace(/&#8212;/g, '\u2014')
+    .replace(/&#x2013;/gi, '\u2013')
+    .replace(/&#x2014;/gi, '\u2014')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#160;/g, ' ')
+    .replace(/&minus;/gi, '\u2212')
+    .replace(/&#8722;/g, '\u2212')
+    // Strip any stray HTML tags between content (e.g. 2<span>-</span>3)
+    .replace(/<[^>]+>/g, '')
     // Ranges WITH units first (most specific)
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(min(?:ute)?s?)\b/gi, '$1 to $2 minutes')
     .replace(/(\d+)\s*[\u002D\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s*(\d+)\s*(hr?s?|hours?)\b/gi, '$1 to $2 hours')
