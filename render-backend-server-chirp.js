@@ -105,13 +105,15 @@ async function checkDriveCache(contentHash, blogPostId) {
       spaces: 'drive',
       fields: 'files(id, name, size)',
       pageSize: 1,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     if (response.data.files && response.data.files.length > 0) {
       const file = response.data.files[0];
       console.log(`💾 Found cached audio: ${file.name} (${file.size} bytes)`);
       const mediaResponse = await driveClient.files.get(
-        { fileId: file.id, alt: 'media' },
+        { fileId: file.id, alt: 'media', supportsAllDrives: true },
         { responseType: 'arraybuffer' }
       );
       return Buffer.from(mediaResponse.data);
@@ -149,6 +151,7 @@ async function saveDriveCache(audioBuffer, contentHash, blogPostId) {
         body: bufferStream,
       },
       fields: 'id, name, size',
+      supportsAllDrives: true,
     });
 
     console.log(`✅ Audio cached to Drive: ${response.data.name} (${audioBuffer.length} bytes)`);
